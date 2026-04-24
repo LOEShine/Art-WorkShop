@@ -1,7 +1,15 @@
-import { getResolvedVideoModelId, resolveVideoMode } from "@/data/video-models";
+import {
+  getFirstLastFrameSources,
+  getResolvedVideoModelId,
+  getVeoReferenceImages,
+  isFirstLastFramesEnabled,
+  resolveVideoMode,
+} from "@/data/video-models";
 import type {
+  ImageConfigRecord,
   ImageModelId,
   ImageTask,
+  VideoConfigRecord,
   VideoModelId,
   VideoTask,
 } from "@/types";
@@ -10,7 +18,7 @@ interface GenerateImageArgs {
   model: ImageModelId;
   prompt: string;
   sourceImages: string[];
-  config: Record<string, string | number | boolean>;
+  config: ImageConfigRecord;
   apiBaseUrl: string;
   apiKey: string;
 }
@@ -21,7 +29,14 @@ interface GenerateImageResult {
 
 interface SubmitVideoArgs {
   modelKey: VideoModelId;
-  config: Record<string, string | number | boolean>;
+  config: VideoConfigRecord;
+  apiBaseUrl: string;
+  apiKey: string;
+}
+
+interface SubmitVeoVideoExtensionArgs {
+  task: VideoTask;
+  prompt: string;
   apiBaseUrl: string;
   apiKey: string;
 }
@@ -95,6 +110,14 @@ export function extractErrorMessage(value: unknown, seen = new WeakSet<object>()
   return "";
 }
 
+function formatNetworkError(error: unknown) {
+  if (error instanceof Error && /failed to fetch|networkerror|load failed/i.test(error.message)) {
+    return "网络请求失败：后端连接被关闭或不可达，请检查 API 地址、代理服务和网络连接";
+  }
+
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function findVideoUrl(value: unknown, keyHint = "", seen = new WeakSet<object>()): string {
   if (!value) {
     return "";
@@ -141,6 +164,212 @@ export function findVideoUrl(value: unknown, keyHint = "", seen = new WeakSet<ob
   }
 
   return "";
+}
+
+function findVideoBytes(value: unknown, seen = new WeakSet<object>()): string {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+
+  if (seen.has(value)) {
+    return "";
+  }
+  seen.add(value);
+
+  const record = value as Record<string, unknown>;
+  const directBytes = record.videoBytes || record.video_bytes || record.bytes || record.data;
+  if (typeof directBytes === "string" && directBytes.trim()) {
+    return directBytes.trim();
+  }
+
+  for (const nestedValue of Object.values(record)) {
+    const nestedBytes = findVideoBytes(nestedValue, seen);
+    if (nestedBytes) {
+      return nestedBytes;
+    }
+  }
+
+  return "";
+}
+
+function base64ToBlob(base64: string, mimeType = "video/mp4") {
+  const normalized = base64.includes(",") ? base64.split(",").pop() || "" : base64;
+  const binary = atob(normalized);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new Blob([bytes], { type: mimeType });
+}
+
+async function responseToVideoBlob(
+  response: Response,
+  apiKey: string,
+  seenUrls = new Set<string>(),
+): Promise<Blob> {
+  if (!response.ok) {
+    throw new Error(`下载视频文件失败 (${response.status})`);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (/json/i.test(contentType)) {
+    const payload = (await response.json()) as Record<string, unknown>;
+    const videoBytes = findVideoBytes(payload);
+    if (videoBytes) {
+      return base64ToBlob(videoBytes, String(payload.mimeType || payload.mime_type || "video/mp4"));
+    }
+
+    const nestedUrl = findVideoUrl(payload);
+    if (nestedUrl && !seenUrls.has(nestedUrl)) {
+      return fetchVideoBlobFromUrl(nestedUrl, apiKey, false, seenUrls);
+    }
+
+    throw new Error(extractErrorMessage(payload) || "视频结果中没有可保存的文件");
+  }
+
+  const blob = await response.blob();
+  if (!blob.size) {
+    throw new Error("下载到的视频文件为空");
+  }
+
+  return blob;
+}
+
+async function fetchVideoBlobFromUrl(
+  url: string,
+  apiKey: string,
+  withAuthorization = false,
+  seenUrls = new Set<string>(),
+): Promise<Blob> {
+  if (!url) {
+    throw new Error("缺少视频文件地址");
+  }
+
+  seenUrls.add(url);
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "video/*,application/octet-stream,application/json",
+      ...(withAuthorization ? { Authorization: `Bearer ${apiKey}` } : {}),
+    },
+  });
+
+  return responseToVideoBlob(response, apiKey, seenUrls);
+}
+
+async function fetchJsonWithNetworkError<T>(url: string, init: RequestInit): Promise<T> {
+  try {
+    return await fetchJson<T>(url, init);
+  } catch (error) {
+    throw new Error(formatNetworkError(error));
+  }
+}
+
+function toVertexPersonGeneration(value: unknown) {
+  const normalized = String(value || "").trim();
+
+  if (normalized === "allow_all") {
+    return "allowAll";
+  }
+
+  if (normalized === "dont_allow") {
+    return "disallow";
+  }
+
+  return normalized || "allowAll";
+}
+
+export async function fetchVideoBlob(
+  task: VideoTask,
+  apiBaseUrl: string,
+  apiKey: string,
+): Promise<Blob> {
+  if (task.videoBlob) {
+    return task.videoBlob;
+  }
+
+  const candidates: Array<{ url: string; withAuthorization: boolean }> = [];
+  const remoteUrl = String(task.remoteVideoUrl || "").trim();
+  const playbackUrl = String(task.videoUrl || "").trim();
+
+  if (remoteUrl) {
+    candidates.push({ url: remoteUrl, withAuthorization: false });
+  }
+  if (playbackUrl) {
+    candidates.push({ url: playbackUrl, withAuthorization: false });
+  }
+  if (task.id) {
+    candidates.push({
+      url: buildApiUrl(apiBaseUrl, `/v1/videos/${encodeURIComponent(task.id)}/content`),
+      withAuthorization: true,
+    });
+  }
+
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      return await fetchVideoBlobFromUrl(candidate.url, apiKey, candidate.withAuthorization);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(
+    lastError instanceof Error
+      ? lastError.message
+      : "无法下载视频文件到 IndexedDB",
+  );
+}
+
+function findVeoVideoReference(value: unknown, keyHint = "", seen = new WeakSet<object>()): unknown {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return /^https?:\/\//i.test(trimmed) && /(video|mp4|mov|webm|content)/i.test(`${keyHint} ${trimmed}`)
+      ? trimmed
+      : null;
+  }
+
+  if (typeof value !== "object") {
+    return null;
+  }
+
+  if (seen.has(value)) {
+    return null;
+  }
+  seen.add(value);
+
+  const record = value as Record<string, unknown>;
+  const hasVideoBytes = Boolean(record.videoBytes || record.video_bytes);
+  const hasFileReference = Boolean(record.fileUri || record.file_uri || record.uri || record.name);
+  const mimeType = String(record.mimeType || record.mime_type || "").toLowerCase();
+
+  if (hasVideoBytes || (hasFileReference && (mimeType.includes("video") || /video/i.test(keyHint)))) {
+    return record;
+  }
+
+  for (const [key, nestedValue] of Object.entries(record)) {
+    if (/^(video|generatedVideo|generated_video)$/i.test(key)) {
+      const nested = findVeoVideoReference(nestedValue, key, seen);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  for (const [key, nestedValue] of Object.entries(record)) {
+    const nested = findVeoVideoReference(nestedValue, key, seen);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return null;
 }
 
 async function fetchJson<T>(url: string, init: RequestInit = {}): Promise<T> {
@@ -424,17 +653,31 @@ export async function submitVideoTask({
     throw new Error("请先输入视频提示词");
   }
 
-  if ((mode === "image" || mode === "first-last") && !String(config.primaryImageSource || "").trim()) {
-    throw new Error("请先上传参考图片");
-  }
-
-  if (mode === "first-last" && !String(config.lastFrameSource || "").trim()) {
-    throw new Error("首尾帧模式需要上传尾帧图片");
-  }
-
   if (modelKey === "veo3") {
-    const endpoint = mode === "image" ? "/fal-ai/veo3/image-to-video" : "/fal-ai/veo3";
-    const response = await fetchJson<Record<string, unknown>>(buildApiUrl(apiBaseUrl, endpoint), {
+    const useFirstLastFrames = isFirstLastFramesEnabled(config);
+    const firstLastSources = getFirstLastFrameSources(config);
+    const referenceImages = getVeoReferenceImages(config);
+    const resolution = String(config.resolution || "720p").trim().toLowerCase();
+    const aspectRatio = String(config.aspectRatio || "16:9").trim();
+    const durationSeconds = 8;
+    const generateAudio = Boolean(config.generateAudio);
+    const personGeneration = String(config.personGeneration || "allow_all");
+    const vertexPersonGeneration = toVertexPersonGeneration(personGeneration);
+
+    if (useFirstLastFrames) {
+      if (!firstLastSources.first) {
+        throw new Error("首尾帧模式需要至少上传一张参考图片");
+      }
+    } else if (mode === "image" && referenceImages.length === 0) {
+      throw new Error("请先上传参考图片");
+    }
+
+    const images =
+      mode === "first-last"
+        ? [firstLastSources.first, firstLastSources.last]
+        : referenceImages;
+
+    const response = await fetchJsonWithNetworkError<Record<string, unknown>>(buildApiUrl(apiBaseUrl, "/v1/video/create"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -442,24 +685,41 @@ export async function submitVideoTask({
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
+        model: getResolvedVideoModelId(modelKey, config),
+        images,
         prompt,
-        aspect_ratio: config.aspectRatio,
-        duration: config.duration,
-        resolution: config.resolution,
-        generate_audio: Boolean(config.generateAudio),
-        ...(mode === "image"
-          ? { image_url: config.primaryImageSource }
-          : {
-              enhance_prompt: Boolean(config.enhancePrompt),
-              auto_fix: Boolean(config.autoFix),
-            }),
+        aspect_ratio: aspectRatio,
+        aspectRatio,
+        duration: durationSeconds,
+        duration_seconds: durationSeconds,
+        durationSeconds,
+        resolution,
+        enable_upsample: resolution === "4k",
+        generate_audio: generateAudio,
+        generateAudio,
+        person_generation: personGeneration,
+        personGeneration: vertexPersonGeneration,
+        parameters: {
+          aspectRatio,
+          durationSeconds,
+          generateAudio,
+          personGeneration: vertexPersonGeneration,
+          resolution,
+          sampleCount: 1,
+        },
       }),
     });
 
     return {
       id: String(response.request_id || response.id || "").trim(),
       modelKey,
-      modelTitle: "Veo 3",
+      modelTitle: "Veo 3.1",
+      prompt,
+      modelConfig:
+        mode === "first-last"
+          ? { ...config, primaryImageSource: firstLastSources.first, lastFrameSource: firstLastSources.last }
+          : { ...config },
+      sourceImages: images,
       status: String(response.status || "IN_QUEUE"),
       phase: "pending",
       progress: "",
@@ -469,9 +729,18 @@ export async function submitVideoTask({
       updatedAt: Date.now(),
       responseUrl: String(response.response_url || ""),
       statusUrl: String(response.status_url || ""),
-      endpoint,
+      endpoint: "/v1/video/create",
       raw: response,
     };
+  }
+
+  const firstLastSources = getFirstLastFrameSources(config);
+  if (mode === "image" && !String(config.primaryImageSource || "").trim()) {
+    throw new Error("请先上传参考图片");
+  }
+
+  if (mode === "first-last" && !firstLastSources.first) {
+    throw new Error("首尾帧模式需要至少上传一张参考图片");
   }
 
   if (modelKey === "hailuo") {
@@ -491,9 +760,9 @@ export async function submitVideoTask({
           resolution: config.resolution,
           prompt_optimizer: Boolean(config.promptOptimizer),
           ...(mode === "image" || mode === "first-last"
-            ? { first_frame_image: config.primaryImageSource }
+            ? { first_frame_image: mode === "first-last" ? firstLastSources.first : config.primaryImageSource }
             : {}),
-          ...(mode === "first-last" ? { last_frame_image: config.lastFrameSource } : {}),
+          ...(mode === "first-last" ? { last_frame_image: firstLastSources.last } : {}),
         }),
       },
     );
@@ -502,6 +771,18 @@ export async function submitVideoTask({
       id: String(response.task_id || (response.data as Record<string, unknown> | undefined)?.task_id || "").trim(),
       modelKey,
       modelTitle: "海螺 Hailuo",
+      prompt,
+      modelConfig:
+        mode === "first-last"
+          ? { ...config, primaryImageSource: firstLastSources.first, lastFrameSource: firstLastSources.last }
+          : { ...config },
+      sourceImages:
+        mode === "image" || mode === "first-last"
+          ? [
+              mode === "first-last" ? firstLastSources.first : String(config.primaryImageSource || ""),
+              ...(mode === "first-last" ? [firstLastSources.last] : []),
+            ].filter(Boolean)
+          : [],
       status: "SUBMITTED",
       phase: "pending",
       progress: "",
@@ -525,12 +806,12 @@ export async function submitVideoTask({
     if (mode === "first-last") {
       content.push({
         type: "image_url",
-        image_url: { url: config.primaryImageSource },
+        image_url: { url: firstLastSources.first },
         role: "first_frame",
       });
       content.push({
         type: "image_url",
-        image_url: { url: config.lastFrameSource },
+        image_url: { url: firstLastSources.last },
         role: "last_frame",
       });
     }
@@ -571,6 +852,18 @@ export async function submitVideoTask({
       id: String(response.id || "").trim(),
       modelKey,
       modelTitle: "Seedance 1.5",
+      prompt,
+      modelConfig:
+        mode === "first-last"
+          ? { ...config, primaryImageSource: firstLastSources.first, lastFrameSource: firstLastSources.last }
+          : { ...config },
+      sourceImages:
+        mode === "image" || mode === "first-last"
+          ? [
+              mode === "first-last" ? firstLastSources.first : String(config.primaryImageSource || ""),
+              ...(mode === "first-last" ? [firstLastSources.last] : []),
+            ].filter(Boolean)
+          : [],
       status: String(response.status || "submitted"),
       phase: "pending",
       progress: "",
@@ -583,7 +876,7 @@ export async function submitVideoTask({
     };
   }
 
-  const response = await fetchJson<Record<string, unknown>>(buildApiUrl(apiBaseUrl, "/v1/video/create"), {
+  const response = await fetchJsonWithNetworkError<Record<string, unknown>>(buildApiUrl(apiBaseUrl, "/v1/video/create"), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -606,6 +899,9 @@ export async function submitVideoTask({
     id: String(response.id || "").trim(),
     modelKey,
     modelTitle: "Sora 2",
+    prompt,
+    modelConfig: { ...config },
+    sourceImages: mode === "image" ? [String(config.primaryImageSource || "")] : [],
     status: String(response.status || "pending"),
     phase: "pending",
     progress: "",
@@ -613,6 +909,117 @@ export async function submitVideoTask({
     videoUrl: "",
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    endpoint: "/v1/video/create",
+    raw: response,
+  };
+}
+
+export async function submitVeoVideoExtension({
+  apiBaseUrl,
+  apiKey,
+  prompt,
+  task,
+}: SubmitVeoVideoExtensionArgs): Promise<VideoTask> {
+  ensureApiKey(apiKey);
+
+  const trimmedPrompt = prompt.trim();
+  if (!trimmedPrompt) {
+    throw new Error("请先输入延长视频提示词");
+  }
+
+  if (task.modelKey !== "veo3") {
+    throw new Error("只有 Veo 3.1 视频支持延长");
+  }
+
+  const sourceVideoUrl = String(task.remoteVideoUrl || task.videoUrl || "").trim();
+  if (!sourceVideoUrl) {
+    throw new Error("当前视频还没有可用于延长的结果文件");
+  }
+  if (sourceVideoUrl.startsWith("blob:") && !task.raw && !task.modelConfig?.sourceVideoReference) {
+    throw new Error("本地保存的视频缺少 Veo 延长所需的生成引用，无法继续延长");
+  }
+
+  const sourceResolution = String(task.modelConfig?.resolution || "720p").trim().toLowerCase();
+  if (sourceResolution !== "720p") {
+    throw new Error("Veo 延长仅支持 720p 输入视频，请用 720p 重新生成后再延长");
+  }
+
+  const aspectRatio = String(task.modelConfig?.aspectRatio || "16:9").trim();
+  const generateAudio = Boolean(task.modelConfig?.generateAudio ?? true);
+  const extensionCount = Number(task.modelConfig?.extensionCount || 0);
+  if (Number.isFinite(extensionCount) && extensionCount >= 20) {
+    throw new Error("该视频已达到最多 20 次延长限制");
+  }
+
+  const videoReference =
+    findVeoVideoReference(task.raw) ||
+    findVeoVideoReference(task.modelConfig?.sourceVideoReference) ||
+    sourceVideoUrl;
+  const modelConfig: VideoConfigRecord = {
+    ...(task.modelConfig || {}),
+    mode: "extend",
+    prompt: trimmedPrompt,
+    duration: "7",
+    resolution: "720p",
+    personGeneration: "allow_all",
+    sourceVideoId: task.id,
+    sourceVideoUrl,
+    sourceVideoReference: typeof videoReference === "string" ? videoReference : "",
+    extensionCount: Number.isFinite(extensionCount) ? extensionCount + 1 : 1,
+  };
+  const response = await fetchJsonWithNetworkError<Record<string, unknown>>(buildApiUrl(apiBaseUrl, "/v1/video/create"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: getResolvedVideoModelId("veo3", modelConfig),
+      prompt: trimmedPrompt,
+      video: videoReference,
+      video_url: sourceVideoUrl,
+      source_video_url: sourceVideoUrl,
+      source_video_id: task.id,
+      aspect_ratio: aspectRatio,
+      aspectRatio,
+      duration: 7,
+      duration_seconds: 7,
+      durationSeconds: 7,
+      resolution: "720p",
+      number_of_videos: 1,
+      person_generation: "allow_all",
+      personGeneration: "allowAll",
+      generate_audio: generateAudio,
+      generateAudio,
+      extend: true,
+      parameters: {
+        aspectRatio,
+        durationSeconds: 7,
+        generateAudio,
+        personGeneration: "allowAll",
+        resolution: "720p",
+        sampleCount: 1,
+      },
+    }),
+  });
+
+  return {
+    id: String(response.request_id || response.id || "").trim(),
+    modelKey: "veo3",
+    modelTitle: "Veo 3.1",
+    prompt: trimmedPrompt,
+    modelConfig,
+    sourceImages: [],
+    status: String(response.status || "IN_QUEUE"),
+    phase: "pending",
+    progress: "",
+    error: "",
+    videoUrl: "",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    responseUrl: String(response.response_url || ""),
+    statusUrl: String(response.status_url || ""),
     endpoint: "/v1/video/create",
     raw: response,
   };
@@ -627,7 +1034,7 @@ export async function pollVideoTask(
 
   if (task.modelKey === "veo3") {
     const response = await fetchJson<Record<string, unknown>>(
-      buildApiUrl(apiBaseUrl, `/fal-ai/veo3/requests/${encodeURIComponent(task.id)}`),
+      buildApiUrl(apiBaseUrl, `/v1/video/query?id=${encodeURIComponent(task.id)}`),
       {
         method: "GET",
         headers: {
@@ -638,35 +1045,40 @@ export async function pollVideoTask(
     );
 
     let payload = response;
-    let videoUrl = findVideoUrl(payload);
-    if (!videoUrl && task.responseUrl) {
+    let videoUrl = String(response.video_url || (response.data as Record<string, unknown> | undefined)?.video_url || "").trim();
+    const status = String(response.status || "").trim() || "pending";
+    const error = extractErrorMessage(response);
+
+    if (!videoUrl && isSuccessStatus(status)) {
       try {
-        payload = await fetchJson<Record<string, unknown>>(task.responseUrl, {
-          method: "GET",
-          headers: {
-            Accept: "application/json",
-            Authorization: `Bearer ${apiKey}`,
+        payload = await fetchJson<Record<string, unknown>>(
+          buildApiUrl(apiBaseUrl, `/v1/videos/${encodeURIComponent(task.id)}/content`),
+          {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
           },
-        });
-        videoUrl = findVideoUrl(payload);
+        );
+        videoUrl =
+          String(payload.video_url || (payload.data as Record<string, unknown> | undefined)?.video_url || "").trim() ||
+          findVideoUrl(payload);
       } catch {
         payload = response;
       }
     }
 
-    const status = String(payload.status || response.status || "").trim() || "IN_PROGRESS";
-    const error = extractErrorMessage(payload) || extractErrorMessage(response);
-
     if (videoUrl && !isErrorStatus(status)) {
       return { status, phase: "success", progress: "100%", error: "", videoUrl, raw: payload };
     }
     if (isErrorStatus(status)) {
-      return { status, phase: "error", error: error || "Veo 任务失败", raw: payload };
+      return { status, phase: "error", error: error || "Veo 3.1 任务失败", raw: payload };
     }
     return {
       status,
       phase: "pending",
-      progress: String(response.progress || task.progress || ""),
+      progress: String((response.data as Record<string, unknown> | undefined)?.progress || response.progress || task.progress || ""),
       error: error || "",
       raw: payload,
     };
@@ -845,4 +1257,3 @@ export function createImageTask(task: Omit<ImageTask, "id">): ImageTask {
         : `task-${Date.now()}`,
   };
 }
-

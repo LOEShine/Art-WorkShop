@@ -18,6 +18,7 @@ import {
   Trash2,
   Type as TypeIcon,
   Upload,
+  Video,
   Volume2,
   WandSparkles,
   X,
@@ -34,9 +35,14 @@ import {
 import { STARTER_PROMPTS } from "@/data/starter-prompts";
 import {
   createDefaultVideoConfigs,
+  getVeoReferenceImageNames,
+  getVeoReferenceImages,
   getSoraDurationOptions,
   getVideoUploadLimit,
+  isFirstLastFramesEnabled,
+  MAX_VEO_REFERENCE_IMAGES,
   resolveVideoMode,
+  supportsFirstLastFrames,
   VIDEO_MODELS,
 } from "@/data/video-models";
 import {
@@ -46,9 +52,11 @@ import {
   optimizeImagePrompt,
   pollVideoTask,
   submitVideoTask,
+  submitVeoVideoExtension,
 } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
 import type {
+  GalleryHistoryItem,
   ImageModelField,
   ImageTask,
   SelectOption,
@@ -64,6 +72,17 @@ interface DynamicField {
   placeholder?: string;
   preview?: boolean;
   compact?: boolean;
+  buttonWidthPx?: number;
+}
+
+interface UploadPreviewItem {
+  source: string;
+  name: string;
+}
+
+interface VideoUploadSlot extends UploadPreviewItem {
+  label: string;
+  slotIndex: number;
 }
 
 const router = useRouter();
@@ -72,16 +91,25 @@ const defaultImageConfigs = createDefaultImageConfigs();
 const defaultVideoConfigs = createDefaultVideoConfigs();
 
 const imageInput = ref<HTMLInputElement | null>(null);
+const videoInput = ref<HTMLInputElement | null>(null);
 const settingsOpen = ref(false);
 const previewImage = ref("");
 const previewTitle = ref("");
 const previewKind = ref<"image" | "video" | "prompt">("image");
 const previewCanContinue = ref(false);
 const currentImageElapsed = ref(0);
+const currentVideoElapsed = ref(0);
+const historyImageResolutionLabels = ref<Record<string, string>>({});
+const historyVideoDurationLabels = ref<Record<string, string>>({});
 const optimizingPrompt = ref(false);
+const submittingVideo = ref(false);
 const promptTextarea = ref<HTMLTextAreaElement | null>(null);
+const draggingImageIndex = ref<number | null>(null);
+const draggingVideoIndex = ref<number | null>(null);
+const videoUploadTargetIndex = ref<number | null>(null);
 
 let imageTimer: number | undefined;
+let videoTimer: number | undefined;
 let videoPollTimer: number | undefined;
 
 function getImageModelIcon(modelId: string) {
@@ -134,81 +162,61 @@ const currentVideoMode = computed(() =>
   resolveVideoMode(store.selectedVideoModel, currentVideoConfig.value),
 );
 
-const currentVideoUploadLimit = computed(() => getVideoUploadLimit(store.selectedVideoModel));
+const currentVideoUploadLimit = computed(() =>
+  getVideoUploadLimit(store.selectedVideoModel, currentVideoConfig.value),
+);
 const currentImageUploadLimit = computed(() => IMAGE_UPLOAD_LIMITS[store.selectedImageModel] ?? 1);
 const canGenerateImage = computed(() => store.prompt.trim().length > 0 && !store.isGenerating);
+const isVideoGenerating = computed(() => submittingVideo.value || store.videoTask?.phase === "pending");
+const videoSupportsFirstLastFrames = computed(() =>
+  supportsFirstLastFrames(store.selectedVideoModel),
+);
+const videoFirstLastEnabled = computed(() =>
+  videoSupportsFirstLastFrames.value && isFirstLastFramesEnabled(currentVideoConfig.value),
+);
+const isVideoFirstLastMode = computed(() => currentVideoMode.value === "first-last");
 
 const currentVideoFields = computed<DynamicField[]>(() => {
   const config = currentVideoConfig.value;
 
   if (store.selectedVideoModel === "veo3") {
-    const aspectOptions =
-      currentVideoMode.value === "image"
-        ? ["auto", "16:9", "9:16"]
-        : ["16:9", "9:16", "1:1"];
-
+    const aspectOptions = ["16:9", "9:16"];
     return [
-      {
-        key: "aspectRatio",
-        label: "比例",
-        type: "choice",
-        columns: "grid-cols-3",
-        options: aspectOptions.map((value) => ({
-          value,
-          label: value === "auto" ? "自适应" : value,
-        })),
-      },
-      {
-        key: "duration",
-        label: "时长",
-        type: "choice",
-        columns: "grid-cols-1",
-        options: [{ value: "8s", label: "8s" }],
-      },
       {
         key: "resolution",
         label: "分辨率",
         type: "choice",
-        columns: "grid-cols-2",
+        compact: true,
+        buttonWidthPx: 92,
         options: [
           { value: "720p", label: "720p" },
           { value: "1080p", label: "1080p" },
+          { value: "4k", label: "4K" },
         ],
+      },
+      {
+        key: "aspectRatio",
+        label: "比例",
+        type: "choice",
+        compact: true,
+        preview: true,
+        buttonWidthPx: 78,
+        options: aspectOptions.map((value) => ({
+          value,
+          label: value,
+        })),
       },
       {
         key: "generateAudio",
         label: "生成音频",
         type: "choice",
-        columns: "grid-cols-2",
+        compact: true,
+        buttonWidthPx: 132,
         options: [
           { value: true, label: "开启" },
           { value: false, label: "关闭" },
         ],
       },
-      ...(currentVideoMode.value === "text"
-        ? [
-            {
-              key: "enhancePrompt",
-              label: "提示词增强",
-              type: "choice" as const,
-              columns: "grid-cols-2",
-              options: [
-                { value: true, label: "开启" },
-                { value: false, label: "关闭" },
-              ],
-            },
-            {
-              key: "autoFix",
-              label: "自动修复",
-              type: "choice" as const,
-              columns: "grid-cols-2",
-              options: [
-                { value: true, label: "开启" },
-                { value: false, label: "关闭" },
-              ],
-            },
-          ]
-        : []),
       {
         key: "prompt",
         label: "提示词",
@@ -392,9 +400,215 @@ const currentVideoFields = computed<DynamicField[]>(() => {
   ];
 });
 
-const visibleHistory = computed(() =>
-  store.history.filter((item) => item.status === "success" && item.resultImages.length > 0),
+const currentVideoFieldRows = computed<DynamicField[][]>(() => {
+  const fields = currentVideoFields.value;
+
+  if (store.selectedVideoModel !== "veo3") {
+    return fields.map((field) => [field]);
+  }
+
+  const resolutionField = fields.find((field) => field.key === "resolution");
+  const aspectRatioField = fields.find((field) => field.key === "aspectRatio");
+
+  if (!resolutionField || !aspectRatioField) {
+    return fields.map((field) => [field]);
+  }
+
+  return [
+    [resolutionField, aspectRatioField],
+    ...fields
+      .filter((field) => field.key !== "resolution" && field.key !== "aspectRatio")
+      .map((field) => [field]),
+  ];
+});
+
+const currentVideoUploadItems = computed<UploadPreviewItem[]>(() => {
+  if (store.selectedVideoModel === "veo3" && !videoFirstLastEnabled.value) {
+    const images = getVeoReferenceImages(currentVideoConfig.value);
+    const names = getVeoReferenceImageNames(currentVideoConfig.value);
+    return images.map((source, index) => ({
+      source,
+      name: names[index] || "",
+    }));
+  }
+
+  const items: UploadPreviewItem[] = [];
+  const primarySource = String(currentVideoConfig.value.primaryImageSource || "").trim();
+  const primaryName = String(currentVideoConfig.value.primaryImageName || "").trim();
+  const lastSource = String(currentVideoConfig.value.lastFrameSource || "").trim();
+  const lastName = String(currentVideoConfig.value.lastFrameName || "").trim();
+
+  if (primarySource) {
+    items.push({ source: primarySource, name: primaryName });
+  }
+
+  if (lastSource && currentVideoUploadLimit.value > 1) {
+    items.push({ source: lastSource, name: lastName });
+  }
+
+  return items;
+});
+
+const firstLastVideoUploadSlots = computed<VideoUploadSlot[]>(() => [
+  {
+    label: "首帧",
+    slotIndex: 0,
+    source: String(currentVideoConfig.value.primaryImageSource || "").trim(),
+    name: String(currentVideoConfig.value.primaryImageName || "").trim(),
+  },
+  {
+    label: "尾帧",
+    slotIndex: 1,
+    source: String(currentVideoConfig.value.lastFrameSource || "").trim(),
+    name: String(currentVideoConfig.value.lastFrameName || "").trim(),
+  },
+]);
+
+const currentVideoUploadCount = computed(() =>
+  isVideoFirstLastMode.value
+    ? firstLastVideoUploadSlots.value.filter((slot) => slot.source).length
+    : currentVideoUploadItems.value.length,
 );
+
+const visibleHistory = computed<GalleryHistoryItem[]>(() => {
+  const imageHistory = store.history
+    .filter((item) => item.status === "success" && item.resultImages.length > 0)
+    .map((item) => ({ ...item, kind: "image" as const }));
+
+  const videoHistory = store.videoHistory
+    .filter((item) => item.phase === "success" && item.videoUrl)
+    .map((item) => ({ ...item, kind: "video" as const }));
+
+  return [...imageHistory, ...videoHistory].sort((left, right) => right.createdAt - left.createdAt);
+});
+
+function getGalleryHistoryKey(task: GalleryHistoryItem) {
+  return `${task.kind}-${task.id}`;
+}
+
+function setHistoryImageResolutionLabel(task: GalleryHistoryItem, event: Event) {
+  if (task.kind !== "image") {
+    return;
+  }
+
+  const image = event.target as HTMLImageElement;
+  if (!image.naturalWidth || !image.naturalHeight) {
+    return;
+  }
+
+  historyImageResolutionLabels.value = {
+    ...historyImageResolutionLabels.value,
+    [getGalleryHistoryKey(task)]: `${image.naturalWidth}×${image.naturalHeight}`,
+  };
+}
+
+function formatVideoSeconds(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "";
+  }
+
+  const roundedSeconds = Math.round(seconds);
+  const minutes = Math.floor(roundedSeconds / 60);
+  const remainder = roundedSeconds % 60;
+
+  if (minutes <= 0) {
+    return `${roundedSeconds}s`;
+  }
+
+  return `${minutes}:${String(remainder).padStart(2, "0")}`;
+}
+
+function setHistoryVideoDurationLabel(task: GalleryHistoryItem, event: Event) {
+  if (task.kind !== "video") {
+    return;
+  }
+
+  const video = event.target as HTMLVideoElement;
+  const label = formatVideoSeconds(video.duration);
+  if (!label) {
+    return;
+  }
+
+  historyVideoDurationLabels.value = {
+    ...historyVideoDurationLabels.value,
+    [getGalleryHistoryKey(task)]: label,
+  };
+}
+
+function formatImageResolutionLabel(task: ImageTask) {
+  const historyKey = `image-${task.id}`;
+  const actualResolution = historyImageResolutionLabels.value[historyKey];
+  if (actualResolution) {
+    return actualResolution;
+  }
+
+  const config = task.modelConfig || {};
+  const size = String(config.size || "").trim();
+  const imageSize = String(config.imageSize || "").trim();
+
+  if (size && size !== "auto") {
+    return size.replace("x", "×");
+  }
+
+  if (imageSize && imageSize !== "auto") {
+    return imageSize;
+  }
+
+  return "";
+}
+
+function formatVideoDurationLabel(task: VideoTask) {
+  const historyKey = `video-${task.id}`;
+  const actualDuration = historyVideoDurationLabels.value[historyKey];
+  if (actualDuration) {
+    return actualDuration;
+  }
+
+  const duration = String(task.modelConfig?.duration || "").trim();
+
+  if (!duration) {
+    return "";
+  }
+
+  return duration.endsWith("s") ? duration : `${duration}s`;
+}
+
+function getVeoExtensionCount(task?: VideoTask | null) {
+  const count = Number(task?.modelConfig?.extensionCount || 0);
+  return Number.isFinite(count) ? count : 0;
+}
+
+function shouldShowVeoExtendButton(task?: VideoTask | null) {
+  return Boolean(
+    task?.modelKey === "veo3" &&
+      task.phase === "success" &&
+      task.videoUrl &&
+      !isErrorStatus(task.status),
+  );
+}
+
+function getVeoExtendDisabledReason(task?: VideoTask | null) {
+  if (!shouldShowVeoExtendButton(task)) {
+    return "";
+  }
+
+  const resolution = String(task?.modelConfig?.resolution || "720p").trim().toLowerCase();
+  if (resolution !== "720p") {
+    return "Veo 延长仅支持 720p 输入视频";
+  }
+
+  if (getVeoExtensionCount(task) >= 20) {
+    return "已达到最多 20 次延长限制";
+  }
+
+  const videoUrl = String(task?.videoUrl || "").trim();
+  const hasGenerationReference = Boolean(task?.remoteVideoUrl || task?.raw || task?.modelConfig?.sourceVideoReference);
+  if (videoUrl.startsWith("blob:") && !hasGenerationReference) {
+    return "本地保存的视频可下载，但缺少 Veo 延长所需的生成引用";
+  }
+
+  return "";
+}
 
 watch(
   () => [store.currentTask?.status, store.currentTask?.createdAt] as const,
@@ -411,6 +625,26 @@ watch(
       }, 100);
     } else {
       currentImageElapsed.value = 0;
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [store.videoTask?.phase, store.videoTask?.createdAt] as const,
+  ([phase, createdAt]) => {
+    if (videoTimer) {
+      window.clearInterval(videoTimer);
+      videoTimer = undefined;
+    }
+
+    if (phase === "pending" && createdAt) {
+      currentVideoElapsed.value = Date.now() - createdAt;
+      videoTimer = window.setInterval(() => {
+        currentVideoElapsed.value = Date.now() - createdAt;
+      }, 100);
+    } else {
+      currentVideoElapsed.value = 0;
     }
   },
   { immediate: true },
@@ -447,11 +681,22 @@ async function refreshVideoTask(force = false) {
 
   try {
     const next = await pollVideoTask(store.videoTask, store.apiBaseUrl, store.apiKey);
-    store.setVideoTask({
+    const updatedTask = {
       ...store.videoTask,
       ...next,
       updatedAt: Date.now(),
-    } as VideoTask);
+    } as VideoTask;
+
+    if (next.phase === "success" && updatedTask.videoUrl) {
+      const playableTask = {
+        ...updatedTask,
+        remoteVideoUrl: updatedTask.remoteVideoUrl || updatedTask.videoUrl,
+      } as VideoTask;
+      store.setVideoTask(playableTask);
+      void store.addVideoHistoryTask(playableTask);
+    } else {
+      store.setVideoTask(updatedTask);
+    }
 
     if (store.videoTask?.phase === "pending") {
       scheduleVideoPolling(5000);
@@ -494,15 +739,51 @@ function downloadImage(src: string, index = 0) {
   anchor.remove();
 }
 
-function downloadVideo(url: string) {
+function buildVideoFileName(task?: VideoTask | null) {
+  const model = task?.modelTitle ? task.modelTitle.replace(/\s+/g, "-").toLowerCase() : "video";
+  const createdAt = task?.createdAt || Date.now();
+  return `art-workshop-${model}-${createdAt}.mp4`;
+}
+
+function downloadBlob(blob: Blob, fileName: string) {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+function downloadVideoUrl(url: string, fileName: string) {
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `art-workshop-video-${Date.now()}.mp4`;
+  anchor.download = fileName;
   anchor.target = "_blank";
   anchor.rel = "noopener noreferrer";
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+}
+
+async function downloadVideo(source: string | VideoTask) {
+  if (typeof source !== "string") {
+    if (source.videoBlob) {
+      downloadBlob(source.videoBlob, source.videoFileName || buildVideoFileName(source));
+      return;
+    }
+
+    const url = source.remoteVideoUrl || source.videoUrl;
+    if (!url) {
+      window.alert("当前视频没有可下载地址");
+      return;
+    }
+    downloadVideoUrl(url, source.videoFileName || buildVideoFileName(source));
+    return;
+  }
+
+  downloadVideoUrl(source, `art-workshop-video-${Date.now()}.mp4`);
 }
 
 function openExternal(url: string) {
@@ -589,10 +870,9 @@ function pickImageFiles() {
   imageInput.value?.click();
 }
 
-function openSiblingFileInput(event: MouseEvent) {
-  const target = event.currentTarget as HTMLElement | null;
-  const input = target?.previousElementSibling as HTMLInputElement | null;
-  input?.click();
+function pickVideoFiles(targetIndex: number | null = null) {
+  videoUploadTargetIndex.value = targetIndex;
+  videoInput.value?.click();
 }
 
 function fileToDataUrl(file: File) {
@@ -608,6 +888,17 @@ function fileToDataUrl(file: File) {
     };
     reader.readAsDataURL(file);
   });
+}
+
+function moveArrayItem<T>(items: T[], fromIndex: number, toIndex: number) {
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= items.length || toIndex >= items.length) {
+    return items;
+  }
+
+  const next = [...items];
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  return next;
 }
 
 async function addImageFiles(files: FileList | File[] | null) {
@@ -635,6 +926,35 @@ async function addImageFiles(files: FileList | File[] | null) {
   }
 }
 
+function removeImageUpload(index: number) {
+  store.removeUploadedImage(index);
+}
+
+function reorderUploadedImages(fromIndex: number, toIndex: number) {
+  store.setUploadedImages(moveArrayItem(store.uploadedImages, fromIndex, toIndex));
+}
+
+function handleImageThumbDragStart(index: number) {
+  draggingImageIndex.value = index;
+}
+
+function handleImageThumbDragOver(event: DragEvent) {
+  event.preventDefault();
+}
+
+function handleImageThumbDrop(index: number) {
+  if (draggingImageIndex.value === null) {
+    return;
+  }
+
+  reorderUploadedImages(draggingImageIndex.value, index);
+  draggingImageIndex.value = null;
+}
+
+function handleImageThumbDragEnd() {
+  draggingImageIndex.value = null;
+}
+
 async function handleImageInput(event: Event) {
   const target = event.target as HTMLInputElement;
   await addImageFiles(target.files);
@@ -648,6 +968,205 @@ async function handleImageDrop(event: DragEvent) {
 
 function handleImageDragOver(event: DragEvent) {
   event.preventDefault();
+}
+
+function setCurrentVideoUploadItems(items: UploadPreviewItem[]) {
+  const nextItems = items
+    .map((item) => ({
+      source: String(item.source || "").trim(),
+      name: String(item.name || "").trim(),
+    }))
+    .filter((item) => item.source)
+    .slice(0, currentVideoUploadLimit.value);
+
+  if (isVideoFirstLastMode.value) {
+    setFirstLastVideoUploadSlots([
+      nextItems[0] || { source: "", name: "" },
+      nextItems[1] || { source: "", name: "" },
+    ]);
+    return;
+  }
+
+  if (store.selectedVideoModel === "veo3" && !videoFirstLastEnabled.value) {
+    store.setVideoField("referenceImages", nextItems.map((item) => item.source).slice(0, MAX_VEO_REFERENCE_IMAGES));
+    store.setVideoField("referenceImageNames", nextItems.map((item) => item.name).slice(0, MAX_VEO_REFERENCE_IMAGES));
+    return;
+  }
+
+  store.setVideoField("primaryImageSource", nextItems[0]?.source || "");
+  store.setVideoField("primaryImageName", nextItems[0]?.name || "");
+  store.setVideoField("lastFrameSource", nextItems[1]?.source || "");
+  store.setVideoField("lastFrameName", nextItems[1]?.name || "");
+}
+
+function setFirstLastVideoUploadSlots(slots: UploadPreviewItem[]) {
+  const first = slots[0] || { source: "", name: "" };
+  const last = slots[1] || { source: "", name: "" };
+
+  store.setVideoField("primaryImageSource", first.source || "");
+  store.setVideoField("primaryImageName", first.name || "");
+  store.setVideoField("lastFrameSource", last.source || "");
+  store.setVideoField("lastFrameName", last.name || "");
+}
+
+async function addFirstLastVideoFiles(files: File[], targetIndex: number | null = null) {
+  if (files.length === 0) {
+    return;
+  }
+
+  const slots = firstLastVideoUploadSlots.value.map((slot) => ({
+    source: slot.source,
+    name: slot.name,
+  }));
+  const startIndex =
+    targetIndex !== null
+      ? targetIndex
+      : slots.findIndex((slot) => !slot.source);
+
+  if (startIndex < 0 || startIndex >= slots.length) {
+    window.alert(`最多只能上传 ${currentVideoUploadLimit.value} 张参考图片`);
+    return;
+  }
+
+  let fileIndex = 0;
+  for (let slotIndex = startIndex; slotIndex < slots.length && fileIndex < files.length; slotIndex += 1) {
+    const file = files[fileIndex];
+    const dataUrl = await fileToDataUrl(file);
+    slots[slotIndex] = {
+      source: dataUrl,
+      name: file.name || buildPastedImageName(file),
+    };
+    fileIndex += 1;
+  }
+
+  setFirstLastVideoUploadSlots(slots);
+
+  if (fileIndex < files.length) {
+    window.alert(`首尾帧最多只能上传 ${currentVideoUploadLimit.value} 张参考图片`);
+  }
+}
+
+async function addVideoFiles(files: FileList | File[] | null, targetIndex: number | null = null) {
+  if (!files) {
+    return;
+  }
+
+  const list = Array.from(files).filter((file) => file.type.startsWith("image/"));
+  if (isVideoFirstLastMode.value) {
+    await addFirstLastVideoFiles(list, targetIndex);
+    return;
+  }
+
+  const room = currentVideoUploadLimit.value - currentVideoUploadItems.value.length;
+  if (room <= 0) {
+    window.alert(`最多只能上传 ${currentVideoUploadLimit.value} 张参考图片`);
+    return;
+  }
+
+  const nextItems = [...currentVideoUploadItems.value];
+  for (const file of list.slice(0, room)) {
+    const dataUrl = await fileToDataUrl(file);
+    nextItems.push({
+      source: dataUrl,
+      name: file.name || buildPastedImageName(file),
+    });
+  }
+
+  setCurrentVideoUploadItems(nextItems);
+
+  if (list.length > room) {
+    window.alert(`已达到上传限制，只能再上传 ${room} 张图片`);
+  }
+}
+
+function clearVideoUploadItem(index: number) {
+  if (isVideoFirstLastMode.value) {
+    const slots = firstLastVideoUploadSlots.value.map((slot) => ({
+      source: slot.source,
+      name: slot.name,
+    }));
+    slots[index] = { source: "", name: "" };
+    setFirstLastVideoUploadSlots(slots);
+    return;
+  }
+
+  const nextItems = [...currentVideoUploadItems.value];
+  nextItems.splice(index, 1);
+  setCurrentVideoUploadItems(nextItems);
+}
+
+function reorderVideoUploadItems(fromIndex: number, toIndex: number) {
+  if (isVideoFirstLastMode.value) {
+    const slots = firstLastVideoUploadSlots.value.map((slot) => ({
+      source: slot.source,
+      name: slot.name,
+    }));
+    const fromSlot = slots[fromIndex];
+
+    if (!fromSlot) {
+      return;
+    }
+
+    slots[fromIndex] = slots[toIndex] || { source: "", name: "" };
+    slots[toIndex] = fromSlot;
+    setFirstLastVideoUploadSlots(slots);
+    return;
+  }
+
+  setCurrentVideoUploadItems(moveArrayItem(currentVideoUploadItems.value, fromIndex, toIndex));
+}
+
+function handleVideoThumbDragStart(index: number) {
+  draggingVideoIndex.value = index;
+}
+
+function handleVideoThumbDragOver(event: DragEvent) {
+  event.preventDefault();
+}
+
+function handleVideoThumbDrop(index: number) {
+  if (draggingVideoIndex.value === null) {
+    return;
+  }
+
+  reorderVideoUploadItems(draggingVideoIndex.value, index);
+  draggingVideoIndex.value = null;
+}
+
+function handleVideoThumbDragEnd() {
+  draggingVideoIndex.value = null;
+}
+
+async function handleFirstLastVideoSlotDrop(event: DragEvent, index: number) {
+  event.preventDefault();
+
+  if (draggingVideoIndex.value !== null) {
+    handleVideoThumbDrop(index);
+    return;
+  }
+
+  const files = event.dataTransfer?.files;
+  if (files && files.length > 0) {
+    await addVideoFiles(files, index);
+    draggingVideoIndex.value = null;
+  }
+}
+
+function handleFirstLastVideoSlotClick(slot: VideoUploadSlot) {
+  if (slot.source) {
+    openPreview(slot.source, slot.name || slot.label, "image");
+    return;
+  }
+
+  pickVideoFiles(slot.slotIndex);
+}
+
+function getVideoUploadItemLabel(index: number) {
+  if (!isVideoFirstLastMode.value) {
+    return "";
+  }
+
+  return index === 0 ? "首帧" : index === 1 ? "尾帧" : "";
 }
 
 function getRandomStarterPrompt() {
@@ -727,18 +1246,40 @@ async function handleGenerateImage() {
   }
 }
 
-function buildVideoImageTarget() {
-  if (currentVideoUploadLimit.value === 2) {
-    if (!String(currentVideoConfig.value.primaryImageSource || "").trim()) {
-      return { sourceKey: "primaryImageSource", nameKey: "primaryImageName" };
-    }
-    if (!String(currentVideoConfig.value.lastFrameSource || "").trim()) {
-      return { sourceKey: "lastFrameSource", nameKey: "lastFrameName" };
-    }
-    return { sourceKey: "primaryImageSource", nameKey: "primaryImageName" };
+function toggleVideoFirstLastFrames() {
+  if (!videoSupportsFirstLastFrames.value) {
+    return;
   }
 
-  return { sourceKey: "primaryImageSource", nameKey: "primaryImageName" };
+  const nextEnabled = !videoFirstLastEnabled.value;
+
+  if (nextEnabled) {
+    const existingItems = currentVideoUploadItems.value;
+    const hasPrimary = Boolean(String(currentVideoConfig.value.primaryImageSource || "").trim());
+    const hasLast = Boolean(String(currentVideoConfig.value.lastFrameSource || "").trim());
+
+    if (!hasPrimary && existingItems[0]) {
+      store.setVideoField("primaryImageSource", existingItems[0].source);
+      store.setVideoField("primaryImageName", existingItems[0].name);
+    }
+    if (!hasLast && existingItems[1]) {
+      store.setVideoField("lastFrameSource", existingItems[1].source);
+      store.setVideoField("lastFrameName", existingItems[1].name);
+    }
+  } else if (store.selectedVideoModel === "veo3") {
+    const existingReferences = getVeoReferenceImages(currentVideoConfig.value);
+    const slots = firstLastVideoUploadSlots.value.filter((slot) => slot.source);
+
+    if (existingReferences.length === 0 && slots.length > 0) {
+      store.setVideoField("referenceImages", slots.map((slot) => slot.source).slice(0, MAX_VEO_REFERENCE_IMAGES));
+      store.setVideoField("referenceImageNames", slots.map((slot) => slot.name).slice(0, MAX_VEO_REFERENCE_IMAGES));
+    }
+  }
+
+  store.setVideoField("useFirstLastFrames", nextEnabled);
+  if (store.selectedVideoModel === "veo3") {
+    store.setVideoField("veoUseFirstLastFrames", nextEnabled);
+  }
 }
 
 function buildPastedImageName(file: File) {
@@ -746,34 +1287,48 @@ function buildPastedImageName(file: File) {
   return `粘贴图片-${Date.now()}.${extension}`;
 }
 
-async function handleVideoAssetFiles(
-  sourceKey: string,
-  nameKey: string,
-  files: FileList | File[] | null,
-) {
-  const file = Array.from(files || []).find((entry) => entry.type.startsWith("image/"));
-  if (!file) {
-    return;
-  }
-
-  const dataUrl = await fileToDataUrl(file);
-  store.setVideoField(sourceKey, dataUrl);
-  store.setVideoField(nameKey, file.name || buildPastedImageName(file));
-}
-
-async function handleVideoInput(event: Event, sourceKey: string, nameKey: string) {
+async function handleVideoInput(event: Event) {
   const target = event.target as HTMLInputElement;
-  await handleVideoAssetFiles(sourceKey, nameKey, target.files);
+  const targetIndex = videoUploadTargetIndex.value;
+
+  videoUploadTargetIndex.value = null;
+  await addVideoFiles(target.files, targetIndex);
   target.value = "";
 }
 
-async function handleVideoDrop(event: DragEvent, sourceKey: string, nameKey: string) {
+async function handleVideoDrop(event: DragEvent, targetIndex: number | null = null) {
   event.preventDefault();
-  await handleVideoAssetFiles(sourceKey, nameKey, event.dataTransfer?.files ?? null);
+  await addVideoFiles(event.dataTransfer?.files ?? null, targetIndex);
 }
 
 async function handleSubmitVideo() {
+  if (isVideoGenerating.value) {
+    return;
+  }
+
   clearVideoPolling();
+  submittingVideo.value = true;
+
+  const startedAt = Date.now();
+  const pendingTask: VideoTask = {
+    id: "",
+    modelKey: store.selectedVideoModel,
+    modelTitle: VIDEO_MODELS[store.selectedVideoModel].title,
+    prompt: String(currentVideoConfig.value.prompt || ""),
+    modelConfig: {
+      ...currentVideoConfig.value,
+      ...(store.selectedVideoModel === "veo3" ? { duration: "8" } : {}),
+    },
+    sourceImages: currentVideoUploadItems.value.map((item) => item.source),
+    status: "SUBMITTING",
+    phase: "pending",
+    progress: "",
+    error: "",
+    videoUrl: "",
+    createdAt: startedAt,
+    updatedAt: startedAt,
+  };
+  store.setVideoTask(pendingTask);
 
   try {
     const task = await submitVideoTask({
@@ -782,13 +1337,72 @@ async function handleSubmitVideo() {
       apiBaseUrl: store.apiBaseUrl,
       apiKey: store.apiKey,
     });
-    store.setVideoTask(task);
+    store.setVideoTask({
+      ...task,
+      createdAt: startedAt,
+      updatedAt: Date.now(),
+    });
     scheduleVideoPolling(300);
   } catch (error) {
     store.setVideoTask({
       id: "",
       modelKey: store.selectedVideoModel,
       modelTitle: VIDEO_MODELS[store.selectedVideoModel].title,
+      status: "ERROR",
+      phase: "error",
+      progress: "",
+      error: error instanceof Error ? error.message : String(error),
+      videoUrl: "",
+      createdAt: startedAt,
+      updatedAt: Date.now(),
+    });
+  } finally {
+    submittingVideo.value = false;
+  }
+}
+
+async function handleExtendVeoVideo(task: VideoTask | null | undefined) {
+  if (!task) {
+    return;
+  }
+
+  const disabledReason = getVeoExtendDisabledReason(task);
+  if (disabledReason) {
+    window.alert(disabledReason);
+    return;
+  }
+
+  const defaultPrompt = String(currentVideoConfig.value.prompt || task.prompt || "").trim();
+  const prompt = window.prompt("输入延长视频提示词", defaultPrompt);
+  if (prompt === null) {
+    return;
+  }
+
+  clearVideoPolling();
+
+  try {
+    const nextTask = await submitVeoVideoExtension({
+      task,
+      prompt,
+      apiBaseUrl: store.apiBaseUrl,
+      apiKey: store.apiKey,
+    });
+    store.setVideoTask(nextTask);
+    scheduleVideoPolling(300);
+  } catch (error) {
+    store.setVideoTask({
+      id: "",
+      modelKey: "veo3",
+      modelTitle: "Veo 3.1",
+      prompt,
+      modelConfig: {
+        ...(task.modelConfig || {}),
+        mode: "extend",
+        prompt,
+        sourceVideoId: task.id,
+        sourceVideoUrl: task.videoUrl,
+      },
+      sourceImages: [],
       status: "ERROR",
       phase: "error",
       progress: "",
@@ -819,31 +1433,50 @@ function handlePreviewDownload() {
   }
 }
 
-async function handleGlobalPaste(event: ClipboardEvent) {
-  const file = Array.from(event.clipboardData?.items || [])
-    .find((item) => item.type.startsWith("image/"))
-    ?.getAsFile();
+function loadGalleryItemConfig(item: GalleryHistoryItem) {
+  if (item.kind === "image") {
+    store.loadTaskConfig(item);
+    return;
+  }
 
-  if (!file) {
+  store.loadVideoTaskConfig(item);
+}
+
+function removeGalleryItem(item: GalleryHistoryItem) {
+  if (item.kind === "image") {
+    void store.removeHistoryTask(item.id);
+    return;
+  }
+
+  void store.removeVideoHistoryTask(item.id);
+}
+
+async function handleGlobalPaste(event: ClipboardEvent) {
+  const files = Array.from(event.clipboardData?.items || [])
+    .filter((item) => item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+
+  if (files.length === 0) {
     return;
   }
 
   event.preventDefault();
 
   if (store.generationMode === "image") {
-    await addImageFiles([file]);
+    await addImageFiles(files);
     return;
   }
 
-  const target = buildVideoImageTarget();
-  const dataUrl = await fileToDataUrl(file);
-  store.setVideoField(target.sourceKey, dataUrl);
-  store.setVideoField(target.nameKey, buildPastedImageName(file));
+  await addVideoFiles(files);
 }
 
 onMounted(() => {
   document.addEventListener("paste", handleGlobalPaste);
   window.requestAnimationFrame(ensureTextareaHeight);
+  if (store.videoTask?.phase === "pending") {
+    scheduleVideoPolling(800);
+  }
 });
 
 onBeforeUnmount(() => {
@@ -851,6 +1484,9 @@ onBeforeUnmount(() => {
   clearVideoPolling();
   if (imageTimer) {
     window.clearInterval(imageTimer);
+  }
+  if (videoTimer) {
+    window.clearInterval(videoTimer);
   }
 });
 </script>
@@ -993,36 +1629,53 @@ onBeforeUnmount(() => {
 
                 <div
                   v-else
-                  class="flex flex-wrap gap-2"
+                  class="space-y-2"
                 >
-                  <div
-                    v-for="(image, index) in store.uploadedImages"
-                    :key="`${image}-${index}`"
-                    class="group relative h-16 w-16 overflow-hidden rounded-md"
-                  >
-                    <img
-                      :src="image"
-                      :alt="`图片 ${index + 1}`"
-                      class="h-full w-full cursor-pointer object-cover"
-                      @click="openPreview(image, `参考图 ${index + 1}`, 'image')"
-                    />
-                    <button
-                      type="button"
-                      class="absolute right-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100"
-                      @click.stop="store.removeUploadedImage(index)"
+                  <div class="flex flex-wrap gap-2">
+                    <div
+                      v-for="(image, index) in store.uploadedImages"
+                      :key="`${image}-${index}`"
+                      class="group relative h-16 w-16 cursor-move overflow-hidden rounded-md ring-1 ring-border/40 transition-all"
+                      draggable="true"
+                      @dragstart="handleImageThumbDragStart(index)"
+                      @dragover="handleImageThumbDragOver"
+                      @drop="handleImageThumbDrop(index)"
+                      @dragend="handleImageThumbDragEnd"
                     >
-                      <X class="h-3 w-3" />
+                      <img
+                        :src="image"
+                        :alt="`图片 ${index + 1}`"
+                        class="h-full w-full cursor-pointer object-cover"
+                        @click="openPreview(image, `参考图 ${index + 1}`, 'image')"
+                      />
+                      <span class="absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 text-[10px] text-white">
+                        {{ index + 1 }}
+                      </span>
+                      <button
+                        type="button"
+                        class="absolute right-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                        @click.stop="removeImageUpload(index)"
+                      >
+                        <X class="h-3 w-3" />
+                      </button>
+                    </div>
+
+                    <button
+                      v-if="store.uploadedImages.length < currentImageUploadLimit"
+                      type="button"
+                      class="flex h-16 w-16 items-center justify-center rounded-md border-2 border-dashed border-muted-foreground/25 bg-muted/50 transition-colors hover:border-muted-foreground/50 hover:bg-muted"
+                      @click="pickImageFiles"
+                    >
+                      <Plus class="h-5 w-5 text-muted-foreground" />
                     </button>
                   </div>
 
-                  <button
-                    v-if="store.uploadedImages.length < currentImageUploadLimit"
-                    type="button"
-                    class="flex h-16 w-16 items-center justify-center rounded-md border-2 border-dashed border-muted-foreground/25 bg-muted/50 transition-colors hover:border-muted-foreground/50 hover:bg-muted"
-                    @click="pickImageFiles"
+                  <div
+                    v-if="store.uploadedImages.length > 1"
+                    class="text-[11px] text-muted-foreground"
                   >
-                    <Plus class="h-5 w-5 text-muted-foreground" />
-                  </button>
+                    拖动缩略图可调整顺序
+                  </div>
                 </div>
               </div>
             </div>
@@ -1145,16 +1798,12 @@ onBeforeUnmount(() => {
             </div>
             <div class="p-6 pt-0">
               <div class="flex h-full flex-col space-y-4">
-                <div class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                  <ImageIcon class="h-4 w-4" />
-                  <span>生成结果</span>
-                </div>
-
                 <div
                   v-if="!store.currentTask"
                   class="flex aspect-video items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25 bg-muted/50"
                 >
                   <div class="text-center text-muted-foreground">
+                    <ImageIcon class="mx-auto mb-2 h-8 w-8 text-muted-foreground/50" />
                     <p class="text-sm">生成结果将在这里显示</p>
                   </div>
                 </div>
@@ -1231,65 +1880,6 @@ onBeforeUnmount(() => {
           </section>
         </div>
 
-        <div
-          v-if="visibleHistory.length > 0"
-          class="mt-6 border-t pt-6"
-        >
-          <div class="columns-2 gap-3 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 2xl:columns-7">
-            <article
-              v-for="task in visibleHistory"
-              :key="task.id"
-              class="group relative mb-4 break-inside-avoid overflow-hidden rounded-lg border bg-card transition-all hover:shadow-md"
-            >
-              <div
-                class="cursor-pointer"
-                @click="openPreview(task.resultImages[0], '', 'image', true)"
-              >
-                <img
-                  :src="task.resultImages[0]"
-                  alt=""
-                  class="w-full transition-opacity hover:opacity-90"
-                />
-              </div>
-
-              <div class="absolute bottom-1 left-1 flex flex-wrap gap-1">
-                <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
-                  {{ IMAGE_MODELS.find((model) => model.id === task.model)?.name || task.model }}
-                </span>
-                <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
-                  {{ formatElapsed(task.generationTime) }}
-                </span>
-              </div>
-
-              <div class="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
-                <button
-                  type="button"
-                  class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-                  title="加载配置"
-                  @click.stop="store.loadTaskConfig(task)"
-                >
-                  <Copy class="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-                  title="继续编辑"
-                  @click.stop="store.continueWithResult(task.resultImages[0])"
-                >
-                  <Pencil class="h-3 w-3" />
-                </button>
-                <button
-                  type="button"
-                  class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-                  title="删除"
-                  @click.stop="store.removeHistoryTask(task.id)"
-                >
-                  <Trash2 class="h-3 w-3" />
-                </button>
-              </div>
-            </article>
-          </div>
-        </div>
       </template>
 
       <template v-else>
@@ -1360,81 +1950,159 @@ onBeforeUnmount(() => {
                 v-if="currentVideoUploadLimit > 0"
                 class="border-t pt-4"
               >
-                <div class="mb-3 flex items-center justify-between">
-                  <div class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                    <Upload class="h-4 w-4" />
+                <div class="mb-3 flex items-center justify-between gap-3">
+                  <div class="flex shrink-0 items-center gap-2 whitespace-nowrap text-sm font-medium text-muted-foreground">
+                    <Upload class="h-4 w-4 shrink-0" />
                     <span>参考图片</span>
+                    <span class="whitespace-nowrap text-xs text-muted-foreground">
+                      {{ currentVideoUploadCount }}/{{ currentVideoUploadLimit }}
+                    </span>
                   </div>
-                  <span class="text-xs text-muted-foreground">(最多{{ currentVideoUploadLimit }}张)</span>
+
+                  <div
+                    v-if="videoSupportsFirstLastFrames"
+                    class="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground"
+                  >
+                    <span class="font-medium">首尾帧</span>
+                    <button
+                      type="button"
+                      class="relative inline-flex h-4 w-8 shrink-0 rounded-full p-0.5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      :class="videoFirstLastEnabled ? 'bg-blue-500' : 'bg-muted'"
+                      role="switch"
+                      :aria-checked="videoFirstLastEnabled"
+                      aria-label="切换首尾帧模式"
+                      @click="toggleVideoFirstLastFrames"
+                    >
+                      <span
+                        class="block h-3 w-3 rounded-full shadow-sm transition-transform"
+                          :style="{
+                            backgroundColor: 'rgb(248, 250, 252)',
+                            transform: videoFirstLastEnabled ? 'translateX(16px)' : 'translateX(0)',
+                          }"
+                      />
+                    </button>
+                  </div>
+                </div>
+
+                <input
+                  ref="videoInput"
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  class="hidden"
+                  @change="handleVideoInput"
+                />
+
+                <div
+                  v-if="isVideoFirstLastMode"
+                  class="grid min-h-[100px] grid-cols-2 gap-2"
+                  style="height: 100px"
+                >
+                  <div
+                    v-for="slot in firstLastVideoUploadSlots"
+                    :key="slot.label"
+                    class="group relative flex min-h-[100px] cursor-pointer flex-col items-center justify-center overflow-hidden rounded-lg border-2 border-dashed border-muted-foreground/25 bg-muted/50 p-3 text-center transition-colors hover:border-muted-foreground/50 hover:bg-muted"
+                    style="height: 100px"
+                    :draggable="Boolean(slot.source)"
+                    @click="handleFirstLastVideoSlotClick(slot)"
+                    @dragstart="slot.source && handleVideoThumbDragStart(slot.slotIndex)"
+                    @dragover.prevent
+                    @drop="handleFirstLastVideoSlotDrop($event, slot.slotIndex)"
+                    @dragend="handleVideoThumbDragEnd"
+                  >
+                    <template v-if="slot.source">
+                      <img
+                        :src="slot.source"
+                        :alt="slot.name || slot.label"
+                        class="absolute inset-0 h-full w-full object-cover"
+                      />
+                      <div class="pointer-events-none absolute inset-0 bg-gradient-to-t from-muted/50 to-transparent" />
+                      <span class="absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 text-[10px] text-white">
+                        {{ slot.label }}
+                      </span>
+                      <button
+                        type="button"
+                        class="absolute right-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                        @click.stop="clearVideoUploadItem(slot.slotIndex)"
+                      >
+                        <X class="h-3 w-3" />
+                      </button>
+                    </template>
+
+                    <template v-else>
+                      <ImageIcon class="h-7 w-7 text-muted-foreground/50" />
+                      <div class="mt-1 text-sm text-muted-foreground">
+                        <p>{{ slot.label }}</p>
+                        <p class="text-xs">点击上传 / 拖拽 / Ctrl+V 粘贴</p>
+                      </div>
+                    </template>
+                  </div>
                 </div>
 
                 <div
-                  class="flex gap-2"
-                  :class="currentVideoUploadLimit === 1 ? 'flex-col' : ''"
+                  v-else-if="currentVideoUploadItems.length === 0"
+                  class="relative flex min-h-[100px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/25 bg-muted/50 p-4 text-center transition-colors hover:border-muted-foreground/50 hover:bg-muted"
+                  @click="pickVideoFiles()"
+                  @drop="handleVideoDrop"
+                  @dragover.prevent
                 >
-                  <div
-                    v-for="asset in currentVideoUploadLimit === 2
-                      ? [
-                          { label: '首帧', sourceKey: 'primaryImageSource', nameKey: 'primaryImageName' },
-                          { label: '尾帧', sourceKey: 'lastFrameSource', nameKey: 'lastFrameName' },
-                        ]
-                      : [
-                          { label: '', sourceKey: 'primaryImageSource', nameKey: 'primaryImageName' },
-                        ]"
-                    :key="asset.sourceKey"
-                    class="flex-1"
-                  >
+                  <ImageIcon class="h-8 w-8 text-muted-foreground/50" />
+                  <div class="text-sm text-muted-foreground">
+                    <p>等待上传</p>
+                    <p class="text-xs">点击上传 / 拖拽 / Ctrl+V 粘贴</p>
+                  </div>
+                </div>
+
+                <div
+                  v-else
+                  class="space-y-2"
+                >
+                  <div class="flex flex-wrap gap-2">
                     <div
-                      class="cursor-pointer rounded-lg border bg-muted/20 p-3 transition-colors hover:border-border/40"
-                      @drop="handleVideoDrop($event, asset.sourceKey, asset.nameKey)"
-                      @dragover.prevent
+                      v-for="(asset, index) in currentVideoUploadItems"
+                      :key="`${asset.source}-${index}`"
+                      class="group relative h-16 w-16 cursor-move overflow-hidden rounded-md ring-1 ring-border/40 transition-all"
+                      draggable="true"
+                      @dragstart="handleVideoThumbDragStart(index)"
+                      @dragover="handleVideoThumbDragOver"
+                      @drop="handleVideoThumbDrop(index)"
+                      @dragend="handleVideoThumbDragEnd"
                     >
-                      <div
-                        v-if="asset.label"
-                        class="mb-2 text-xs font-medium text-muted-foreground"
-                      >
-                        {{ asset.label }}
-                      </div>
-
-                      <input
-                        type="file"
-                        accept="image/*"
-                        class="hidden"
-                        :ref="() => null"
-                        @change="handleVideoInput($event, asset.sourceKey, asset.nameKey)"
+                      <img
+                        :src="asset.source"
+                        :alt="asset.name || `参考图 ${index + 1}`"
+                        class="h-full w-full cursor-pointer object-cover"
+                        @click="openPreview(asset.source, asset.name || `参考图 ${index + 1}`, 'image')"
                       />
-
-                      <div
-                        class="flex min-h-[120px] flex-col items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25 bg-muted/50 p-4 text-center"
-                        @click="openSiblingFileInput($event)"
+                      <span
+                        class="absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 text-[10px] text-white"
                       >
-                        <template v-if="String(currentVideoConfig[asset.sourceKey] || '').trim()">
-                          <div class="mb-2 flex w-full items-center justify-between gap-2 text-xs text-muted-foreground">
-                            <span class="truncate">{{ currentVideoConfig[asset.nameKey] || '已选择图片' }}</span>
-                            <button
-                              type="button"
-                              class="rounded bg-black/60 px-1.5 py-0.5 text-white"
-                              @click.stop="store.clearVideoAsset(asset.sourceKey, asset.nameKey)"
-                            >
-                              清除
-                            </button>
-                          </div>
-                          <div class="overflow-hidden rounded-lg border bg-muted/30">
-                            <img
-                              :src="String(currentVideoConfig[asset.sourceKey] || '')"
-                              :alt="asset.label || '参考图'"
-                              class="h-32 w-full object-cover"
-                            />
-                          </div>
-                        </template>
-
-                        <template v-else>
-                          <ImageIcon class="mb-2 h-8 w-8 text-muted-foreground/50" />
-                          <p class="text-sm text-muted-foreground">等待上传</p>
-                          <p class="text-xs text-muted-foreground">点击上传 / 拖拽 / Ctrl+V 粘贴</p>
-                        </template>
-                      </div>
+                        {{ getVideoUploadItemLabel(index) || index + 1 }}
+                      </span>
+                      <button
+                        type="button"
+                        class="absolute right-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                        @click.stop="clearVideoUploadItem(index)"
+                      >
+                        <X class="h-3 w-3" />
+                      </button>
                     </div>
+
+                    <button
+                      v-if="currentVideoUploadItems.length < currentVideoUploadLimit"
+                      type="button"
+                      class="flex h-16 w-16 items-center justify-center rounded-md border-2 border-dashed border-muted-foreground/25 bg-muted/50 transition-colors hover:border-muted-foreground/50 hover:bg-muted"
+                      @click="pickVideoFiles()"
+                    >
+                      <Plus class="h-5 w-5 text-muted-foreground" />
+                    </button>
+                  </div>
+
+                  <div
+                    v-if="currentVideoUploadItems.length > 1"
+                    class="text-[11px] text-muted-foreground"
+                  >
+                    拖动缩略图可调整顺序
                   </div>
                 </div>
               </div>
@@ -1448,54 +2116,97 @@ onBeforeUnmount(() => {
 
             <div class="space-y-4 p-6 pt-0">
               <div
-                v-for="field in currentVideoFields"
-                :key="field.key"
-                class="space-y-2"
+                v-for="row in currentVideoFieldRows"
+                :key="row.map((field) => field.key).join('-')"
+                :class="row.length > 1 ? 'flex flex-wrap items-start gap-3' : 'space-y-2'"
               >
-                <div class="text-xs font-medium text-muted-foreground">{{ field.label }}</div>
-
                 <div
-                  v-if="field.type === 'choice'"
-                  class="grid gap-2"
-                  :class="field.columns"
+                  v-for="field in row"
+                  :key="field.key"
+                  class="space-y-2"
                 >
-                  <button
-                    v-for="option in field.options"
-                    :key="String(option.value)"
-                    type="button"
-                    class="rounded-lg py-2.5 text-sm font-medium transition-all"
-                    :class="currentVideoConfig[field.key] === option.value ? 'bg-blue-500 text-white' : 'bg-muted/50 text-muted-foreground hover:bg-muted'"
-                    @click="store.setVideoField(field.key, option.value)"
+                  <div class="text-xs font-medium text-muted-foreground">{{ field.label }}</div>
+
+                  <div
+                    v-if="field.type === 'choice'"
+                    :class="field.compact ? 'flex flex-wrap items-start gap-2' : ['grid gap-2', field.columns]"
                   >
-                    {{ option.label }}
-                  </button>
+                    <template v-if="field.preview">
+                      <button
+                        v-for="option in field.options"
+                        :key="String(option.value)"
+                        type="button"
+                        :class="[
+                          'flex h-10 flex-col items-center justify-center rounded-md transition-all',
+                          currentVideoConfig[field.key] === option.value
+                            ? 'bg-blue-500 text-white'
+                            : 'bg-muted/50 text-muted-foreground hover:bg-muted',
+                        ]"
+                        :style="field.buttonWidthPx ? { width: `${field.buttonWidthPx}px`, minWidth: `${field.buttonWidthPx}px` } : undefined"
+                        @click="store.setVideoField(field.key, option.value)"
+                      >
+                        <div class="flex h-4 items-end justify-center">
+                          <div
+                            class="rounded-[3px] border-2 border-current"
+                            :style="aspectPreviewStyle(option.value)"
+                          />
+                        </div>
+                        <span class="mt-1 text-[10px] font-medium leading-none">{{ option.label }}</span>
+                      </button>
+                    </template>
+
+                    <button
+                      v-else
+                      v-for="option in field.options"
+                      :key="String(option.value)"
+                      type="button"
+                      :class="[
+                        'h-10 rounded-lg py-2.5 text-sm font-medium transition-all',
+                        currentVideoConfig[field.key] === option.value
+                          ? 'bg-blue-500 text-white'
+                          : 'bg-muted/50 text-muted-foreground hover:bg-muted',
+                      ]"
+                      :style="field.buttonWidthPx ? { width: `${field.buttonWidthPx}px`, minWidth: `${field.buttonWidthPx}px` } : undefined"
+                      @click="store.setVideoField(field.key, option.value)"
+                    >
+                      {{ option.label }}
+                    </button>
+                  </div>
+
+                  <input
+                    v-else-if="field.type === 'text'"
+                    :value="String(currentVideoConfig[field.key] || '')"
+                    type="text"
+                    class="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    :placeholder="field.placeholder"
+                    @input="store.setVideoField(field.key, ($event.target as HTMLInputElement).value)"
+                  />
+
+                  <textarea
+                    v-else
+                    :value="String(currentVideoConfig[field.key] || '')"
+                    class="min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    :placeholder="field.placeholder"
+                    @input="store.setVideoField(field.key, ($event.target as HTMLTextAreaElement).value)"
+                  />
                 </div>
-
-                <input
-                  v-else-if="field.type === 'text'"
-                  :value="String(currentVideoConfig[field.key] || '')"
-                  type="text"
-                  class="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  :placeholder="field.placeholder"
-                  @input="store.setVideoField(field.key, ($event.target as HTMLInputElement).value)"
-                />
-
-                <textarea
-                  v-else
-                  :value="String(currentVideoConfig[field.key] || '')"
-                  class="min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  :placeholder="field.placeholder"
-                  @input="store.setVideoField(field.key, ($event.target as HTMLTextAreaElement).value)"
-                />
               </div>
 
               <button
                 type="button"
-                class="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-primary px-8 text-sm font-semibold text-primary-foreground shadow transition-colors hover:bg-primary/90"
-                :disabled="store.videoTask?.phase === 'pending'"
+                class="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-primary px-8 text-sm font-semibold text-primary-foreground shadow transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-primary disabled:text-primary-foreground"
+                :disabled="isVideoGenerating"
                 @click="handleSubmitVideo"
               >
-                {{ store.videoTask?.phase === 'pending' ? '任务进行中...' : '开始生成视频' }}
+                <LoaderCircle
+                  v-if="isVideoGenerating"
+                  class="h-4 w-4 animate-spin"
+                />
+                <Sparkles
+                  v-else
+                  class="h-4 w-4"
+                />
+                {{ isVideoGenerating ? '生成中...' : '开始生成' }}
               </button>
             </div>
           </section>
@@ -1510,8 +2221,8 @@ onBeforeUnmount(() => {
                 class="flex aspect-video items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25 bg-muted/50"
               >
                 <div class="px-6 text-center text-muted-foreground">
+                  <Video class="mx-auto mb-2 h-9 w-9 text-muted-foreground/50" />
                   <p class="text-sm font-medium">视频生成结果将在这里显示</p>
-                  <p class="mt-1 text-xs">提交任务后会自动轮询状态并展示预览/下载。</p>
                 </div>
               </div>
 
@@ -1519,85 +2230,67 @@ onBeforeUnmount(() => {
                 v-else
                 class="space-y-4"
               >
-                <div class="rounded-lg border bg-muted/20 p-4">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span
-                      class="rounded-full px-2.5 py-1 text-[11px] font-medium"
-                      :class="getVideoTaskStatusClass(store.videoTask)"
-                    >
-                      {{ getVideoTaskStatusLabel(store.videoTask) }}
-                    </span>
-                    <span class="text-xs text-muted-foreground">{{ store.videoTask.modelTitle }}</span>
+                <template v-if="store.videoTask.videoUrl && !isErrorStatus(store.videoTask.status)">
+                  <div class="overflow-hidden rounded-lg border-2 border-dashed border-muted-foreground/25 bg-black">
+                    <video
+                      :src="store.videoTask.videoUrl"
+                      controls
+                      playsinline
+                      class="aspect-video w-full"
+                    />
                   </div>
 
-                  <div class="mt-3 space-y-2 text-xs text-muted-foreground">
-                    <div>
-                      任务 ID：
-                      <span class="font-mono text-foreground">{{ store.videoTask.id || "-" }}</span>
-                    </div>
-                    <div>提交时间：{{ formatTimestamp(store.videoTask.createdAt) }}</div>
-                    <div>最后更新：{{ formatTimestamp(store.videoTask.updatedAt) }}</div>
-                    <div v-if="store.videoTask.progress">
-                      进度：
-                      <span class="text-foreground">{{ store.videoTask.progress }}</span>
-                    </div>
-                    <div
-                      v-if="store.videoTask.error"
-                      class="rounded-md border border-red-500/20 bg-red-500/5 p-3 text-red-500"
-                    >
-                      {{ store.videoTask.error }}
-                    </div>
-                  </div>
-
-                  <div class="mt-4 flex flex-wrap gap-2">
+                  <div
+                    class="flex flex-wrap gap-2"
+                  >
                     <button
-                      v-if="store.videoTask.phase === 'pending'"
                       type="button"
-                      class="inline-flex items-center justify-center rounded-md border px-3 py-2 text-xs transition-colors hover:bg-accent"
-                      @click="refreshVideoTask(true)"
+                      class="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-secondary px-3 text-sm font-medium text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                      title="下载视频"
+                      @click="downloadVideo(store.videoTask)"
                     >
-                      立即刷新
+                      <Download class="h-4 w-4" />
+                      下载
                     </button>
-
                     <button
-                      v-if="store.videoTask.videoUrl"
+                      v-if="shouldShowVeoExtendButton(store.videoTask)"
                       type="button"
-                      class="inline-flex items-center justify-center rounded-md border px-3 py-2 text-xs transition-colors hover:bg-accent"
-                      @click="openExternal(store.videoTask.videoUrl)"
+                      class="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-secondary px-3 text-sm font-medium text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-50"
+                      :disabled="Boolean(getVeoExtendDisabledReason(store.videoTask))"
+                      :title="getVeoExtendDisabledReason(store.videoTask) || '延长 7 秒'"
+                      @click="handleExtendVeoVideo(store.videoTask)"
                     >
-                      新窗口打开
-                    </button>
-
-                    <button
-                      v-if="store.videoTask.videoUrl"
-                      type="button"
-                      class="inline-flex items-center justify-center rounded-md bg-primary px-3 py-2 text-xs text-primary-foreground transition-colors hover:bg-primary/90"
-                      @click="downloadVideo(store.videoTask.videoUrl)"
-                    >
-                      下载视频
+                      <StepForward class="h-4 w-4" />
+                      延长 7s
                     </button>
                   </div>
-                </div>
-
-                <div
-                  v-if="store.videoTask.videoUrl && !isErrorStatus(store.videoTask.status)"
-                  class="overflow-hidden rounded-lg border bg-black"
-                >
-                  <video
-                    :src="store.videoTask.videoUrl"
-                    controls
-                    playsinline
-                    class="aspect-video w-full"
-                  />
-                </div>
+                  <p
+                    v-if="store.videoTask.error"
+                    class="text-xs text-destructive"
+                  >
+                    {{ store.videoTask.error }}
+                  </p>
+                </template>
 
                 <div
                   v-else
                   class="flex aspect-video items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25 bg-muted/50"
                 >
                   <div class="px-6 text-center text-muted-foreground">
+                    <Video class="mx-auto mb-2 h-9 w-9 text-muted-foreground/50" />
                     <p class="text-sm font-medium">{{ store.videoTask.phase === 'error' ? '任务失败' : '正在生成视频' }}</p>
-                    <p class="mt-1 text-xs">{{ store.videoTask.phase === 'error' ? '请调整参数或切换模型后重试。' : '已提交到官方接口，正在轮询状态。' }}</p>
+                    <p
+                      v-if="store.videoTask.phase === 'pending'"
+                      class="mt-1 font-mono text-xs text-muted-foreground"
+                    >
+                      {{ formatElapsed(currentVideoElapsed) }}
+                    </p>
+                    <p
+                      v-else
+                      class="mt-1 text-xs"
+                    >
+                      {{ store.videoTask.error || '请调整参数或切换模型后重试。' }}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -1605,6 +2298,119 @@ onBeforeUnmount(() => {
           </section>
         </div>
       </template>
+
+      <div
+        v-if="visibleHistory.length > 0"
+        class="mt-6 border-t pt-6"
+      >
+        <div class="columns-2 gap-3 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 2xl:columns-7">
+          <article
+            v-for="task in visibleHistory"
+            :key="`${task.kind}-${task.id}`"
+            class="group relative mb-4 break-inside-avoid overflow-hidden rounded-lg border bg-card transition-all hover:shadow-md"
+          >
+            <div
+              class="cursor-pointer"
+              @click="task.kind === 'image' ? openPreview(task.resultImages[0], '', 'image', true) : openPreview(task.videoUrl, '', 'video', false)"
+            >
+              <img
+                v-if="task.kind === 'image'"
+                :src="task.resultImages[0]"
+                alt=""
+                class="w-full transition-opacity hover:opacity-90"
+                @load="setHistoryImageResolutionLabel(task, $event)"
+              />
+              <video
+                v-else
+                :src="task.videoUrl"
+                muted
+                playsinline
+                preload="metadata"
+                class="w-full bg-black transition-opacity hover:opacity-90"
+                @loadedmetadata="setHistoryVideoDurationLabel(task, $event)"
+              />
+            </div>
+
+            <div class="absolute bottom-1 left-1 flex flex-col items-start gap-1">
+              <div class="flex flex-wrap gap-1">
+                <span
+                  v-if="task.kind === 'image' ? formatImageResolutionLabel(task) : formatVideoDurationLabel(task)"
+                  class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white"
+                >
+                  {{
+                    task.kind === 'image'
+                      ? formatImageResolutionLabel(task)
+                      : formatVideoDurationLabel(task)
+                  }}
+                </span>
+              </div>
+              <div class="flex flex-wrap gap-1">
+                <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
+                  {{
+                    task.kind === 'image'
+                      ? IMAGE_MODELS.find((model) => model.id === task.model)?.name || task.model
+                      : task.modelTitle
+                  }}
+                </span>
+                <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
+                  {{
+                    task.kind === 'image'
+                      ? formatElapsed(task.generationTime)
+                      : formatElapsed((task.updatedAt || task.createdAt) - task.createdAt)
+                  }}
+                </span>
+              </div>
+            </div>
+
+            <div class="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+              <button
+                type="button"
+                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                title="加载配置"
+                @click.stop="loadGalleryItemConfig(task)"
+              >
+                <Copy class="h-3 w-3" />
+              </button>
+              <button
+                v-if="task.kind === 'image'"
+                type="button"
+                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                title="继续编辑"
+                @click.stop="store.continueWithResult(task.resultImages[0])"
+              >
+                <Pencil class="h-3 w-3" />
+              </button>
+              <button
+                v-if="task.kind === 'video' && shouldShowVeoExtendButton(task)"
+                type="button"
+                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="Boolean(getVeoExtendDisabledReason(task))"
+                :title="getVeoExtendDisabledReason(task) || '延长 7 秒'"
+                @click.stop="handleExtendVeoVideo(task)"
+              >
+                <StepForward class="h-3 w-3" />
+              </button>
+              <button
+                v-if="task.kind === 'video'"
+                type="button"
+                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                title="下载"
+                @click.stop="downloadVideo(task)"
+              >
+                <Download class="h-3 w-3" />
+              </button>
+              <button
+                type="button"
+                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                title="删除"
+                @click.stop="removeGalleryItem(task)"
+              >
+                <Trash2 class="h-3 w-3" />
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
     </main>
 
     <SettingsModal

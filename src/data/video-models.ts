@@ -1,4 +1,5 @@
 import type {
+  VideoConfigRecord,
   VideoMode,
   VideoModelConfigs,
   VideoModelId,
@@ -6,19 +7,69 @@ import type {
 } from "@/types";
 
 export const VIDEO_TRANSIENT_KEYS = [
+  "referenceImages",
+  "referenceImageNames",
   "primaryImageSource",
   "primaryImageName",
   "lastFrameSource",
   "lastFrameName",
 ] as const;
+export const MAX_VEO_REFERENCE_IMAGES = 3;
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean);
+}
+
+export function getVeoReferenceImages(config: VideoConfigRecord): string[] {
+  return toStringArray(config.referenceImages).slice(0, MAX_VEO_REFERENCE_IMAGES);
+}
+
+export function getVeoReferenceImageNames(config: VideoConfigRecord): string[] {
+  const names = toStringArray(config.referenceImageNames);
+  return names.slice(0, Math.max(getVeoReferenceImages(config).length, names.length, 0));
+}
+
+export function isVeoFirstLastEnabled(config: VideoConfigRecord): boolean {
+  return isFirstLastFramesEnabled(config);
+}
+
+export function isFirstLastFramesEnabled(config: VideoConfigRecord): boolean {
+  return Boolean(config.useFirstLastFrames || config.veoUseFirstLastFrames);
+}
+
+export function supportsFirstLastFrames(modelKey: VideoModelId): boolean {
+  return getAvailableVideoModes(modelKey).includes("first-last");
+}
+
+export function getFirstLastFrameSources(config: VideoConfigRecord) {
+  const first = String(config.primaryImageSource || "").trim();
+  const last = String(config.lastFrameSource || "").trim();
+  const fallback = first || last;
+
+  return {
+    first: first || fallback,
+    last: last || fallback,
+  };
+}
+
+export function hasAnyFirstLastFrame(config: VideoConfigRecord): boolean {
+  const sources = getFirstLastFrameSources(config);
+  return Boolean(sources.first || sources.last);
+}
 
 export const VIDEO_MODELS: Record<VideoModelId, VideoModelMeta> = {
   veo3: {
     key: "veo3",
-    title: "Veo 3",
-    desc: "文生/图生视频，支持音频开关。",
-    detail: "基于 VectorEngine 文档中的 fal-ai Veo 3 接口。",
-    docsUrl: "https://vectorengine.apifox.cn/api-358028510",
+    title: "Veo 3.1",
+    desc: "文生/图生/首尾帧视频，支持音频开关。",
+    detail: "基于 Veo 3.1 路线的文生/图生/首尾帧视频模型。",
+    docsUrl: "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/veo/3-1-generate",
     iconSvg: `
       <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
         <path d="M214.101333 512c0-32.512 5.546667-63.701333 15.36-92.928L57.173333 290.218667A491.861333 491.861333 0 0 0 4.693333 512c0 79.701333 18.858667 154.88 52.394667 221.610667l172.202667-129.066667A290.56 290.56 0 0 1 214.101333 512" fill="#FBBC05"></path>
@@ -27,7 +78,7 @@ export const VIDEO_MODELS: Record<VideoModelId, VideoModelMeta> = {
         <path d="M1005.397333 512c0-29.568-4.693333-61.44-11.648-91.008H516.650667V614.4h274.602666c-13.696 65.962667-51.072 116.650667-104.533333 149.632l163.541333 123.818667c93.994667-85.418667 155.136-212.650667 155.136-375.850667" fill="#4285F4"></path>
       </svg>
     `,
-    badges: ["text", "image", "audio"],
+    badges: ["text", "image", "first-last", "audio"],
   },
   hailuo: {
     key: "hailuo",
@@ -83,13 +134,19 @@ export function createDefaultVideoConfigs(): VideoModelConfigs {
       mode: "text",
       prompt: "",
       aspectRatio: "16:9",
-      duration: "8s",
+      duration: "8",
       resolution: "720p",
       generateAudio: true,
-      enhancePrompt: true,
-      autoFix: true,
+      personGeneration: "allow_all",
+      seed: "",
+      useFirstLastFrames: false,
+      veoUseFirstLastFrames: false,
+      referenceImages: [],
+      referenceImageNames: [],
       primaryImageSource: "",
       primaryImageName: "",
+      lastFrameSource: "",
+      lastFrameName: "",
     },
     hailuo: {
       mode: "text",
@@ -97,6 +154,7 @@ export function createDefaultVideoConfigs(): VideoModelConfigs {
       duration: "10",
       resolution: "768P",
       promptOptimizer: true,
+      useFirstLastFrames: false,
       primaryImageSource: "",
       primaryImageName: "",
       lastFrameSource: "",
@@ -114,6 +172,7 @@ export function createDefaultVideoConfigs(): VideoModelConfigs {
       watermark: false,
       generateAudio: false,
       returnLastFrame: false,
+      useFirstLastFrames: false,
       primaryImageSource: "",
       primaryImageName: "",
       lastFrameSource: "",
@@ -137,7 +196,7 @@ export function createDefaultVideoConfigs(): VideoModelConfigs {
 export function getAvailableVideoModes(modelKey: VideoModelId): VideoMode[] {
   switch (modelKey) {
     case "veo3":
-      return ["text", "image"];
+      return ["text", "image", "first-last"];
     case "hailuo":
       return ["text", "image", "first-last"];
     case "seedance":
@@ -149,12 +208,16 @@ export function getAvailableVideoModes(modelKey: VideoModelId): VideoMode[] {
   }
 }
 
-export function getVideoUploadLimit(modelKey: VideoModelId): number {
-  if (modelKey === "hailuo" || modelKey === "seedance") {
-    return 2;
+export function getVideoUploadLimit(modelKey: VideoModelId, config?: VideoConfigRecord): number {
+  if (modelKey === "veo3") {
+    return isFirstLastFramesEnabled(config || {}) ? 2 : MAX_VEO_REFERENCE_IMAGES;
   }
 
-  if (modelKey === "veo3" || modelKey === "sora") {
+  if (modelKey === "hailuo" || modelKey === "seedance") {
+    return isFirstLastFramesEnabled(config || {}) ? 2 : 1;
+  }
+
+  if (modelKey === "sora") {
     return 1;
   }
 
@@ -163,13 +226,20 @@ export function getVideoUploadLimit(modelKey: VideoModelId): number {
 
 export function resolveVideoMode(
   modelKey: VideoModelId,
-  config: Record<string, string | number | boolean>,
+  config: VideoConfigRecord,
 ): VideoMode {
+  if (modelKey === "veo3") {
+    if (isFirstLastFramesEnabled(config)) {
+      return "first-last";
+    }
+
+    return getVeoReferenceImages(config).length > 0 ? "image" : "text";
+  }
+
   const hasPrimary = Boolean(String(config.primaryImageSource || "").trim());
-  const hasLast = Boolean(String(config.lastFrameSource || "").trim());
   const modes = getAvailableVideoModes(modelKey);
 
-  if (modes.includes("first-last") && hasPrimary && hasLast) {
+  if (modes.includes("first-last") && isFirstLastFramesEnabled(config)) {
     return "first-last";
   }
 
@@ -182,12 +252,13 @@ export function resolveVideoMode(
 
 export function getResolvedVideoModelId(
   modelKey: VideoModelId,
-  config: Record<string, string | number | boolean>,
+  config: VideoConfigRecord,
 ): string {
   const mode = resolveVideoMode(modelKey, config);
 
   if (modelKey === "veo3") {
-    return "fal-ai/veo3";
+    const resolution = String(config.resolution || "").trim().toLowerCase();
+    return resolution === "4k" ? "veo3.1-pro-4k" : "veo3.1-pro";
   }
 
   if (modelKey === "hailuo") {
@@ -206,14 +277,14 @@ export function getResolvedVideoModelId(
 }
 
 export function getSoraDurationOptions(
-  config: Record<string, string | number | boolean>,
+  config: VideoConfigRecord,
 ): string[] {
   return resolveVideoMode("sora", config) === "image" ? ["10", "15"] : ["15", "25"];
 }
 
 export function normalizeVideoConfig(
   modelKey: VideoModelId,
-  config: Record<string, string | number | boolean>,
+  config: VideoConfigRecord,
 ): void {
   const availableModes = getAvailableVideoModes(modelKey);
   const currentMode = String(config.mode || "");
@@ -221,23 +292,72 @@ export function normalizeVideoConfig(
     config.mode = availableModes[0];
   }
 
+  if (modelKey === "veo3") {
+    if (typeof config.useFirstLastFrames !== "boolean") {
+      config.useFirstLastFrames = Boolean(config.veoUseFirstLastFrames || currentMode === "first-last");
+    }
+    if (typeof config.veoUseFirstLastFrames !== "boolean") {
+      config.veoUseFirstLastFrames = Boolean(config.useFirstLastFrames);
+    }
+    config.veoUseFirstLastFrames = Boolean(config.useFirstLastFrames);
+
+    const migratedReferenceImages = getVeoReferenceImages(config);
+    const migratedReferenceNames = getVeoReferenceImageNames(config);
+    const legacyPrimary = String(config.primaryImageSource || "").trim();
+    const legacyPrimaryName = String(config.primaryImageName || "").trim();
+
+    if (!migratedReferenceImages.length && legacyPrimary && currentMode === "image") {
+      migratedReferenceImages.push(legacyPrimary);
+      if (legacyPrimaryName) {
+        migratedReferenceNames.push(legacyPrimaryName);
+      }
+    }
+
+    config.referenceImages = migratedReferenceImages.slice(0, MAX_VEO_REFERENCE_IMAGES);
+    config.referenceImageNames = migratedReferenceNames.slice(0, MAX_VEO_REFERENCE_IMAGES);
+
+    if (!String(config.primaryImageSource || "").trim()) {
+      config.primaryImageName = "";
+    }
+
+    if (!String(config.lastFrameSource || "").trim()) {
+      config.lastFrameName = "";
+    }
+
+    const mode = resolveVideoMode(modelKey, config);
+    config.mode = mode;
+
+    const resolution = String(config.resolution || "").trim().toLowerCase();
+    config.resolution = ["720p", "1080p", "4k"].includes(resolution) ? resolution : "720p";
+
+    if (!["16:9", "9:16"].includes(String(config.aspectRatio || ""))) {
+      config.aspectRatio = "16:9";
+    }
+
+    config.personGeneration = "allow_all";
+    config.duration = "8";
+    return;
+  }
+
+  if (supportsFirstLastFrames(modelKey) && typeof config.useFirstLastFrames !== "boolean") {
+    config.useFirstLastFrames = currentMode === "first-last";
+  }
+
   if (!String(config.primaryImageSource || "").trim()) {
     config.primaryImageName = "";
-    if (config.mode !== "text") {
+    if (!isFirstLastFramesEnabled(config) && config.mode !== "text") {
       config.mode = "text";
     }
   }
 
   if (!String(config.lastFrameSource || "").trim()) {
     config.lastFrameName = "";
-    if (config.mode === "first-last") {
+    if (!isFirstLastFramesEnabled(config) && config.mode === "first-last") {
       config.mode = String(config.primaryImageSource || "").trim() ? "image" : "text";
     }
   }
 
-  if (modelKey === "veo3" && resolveVideoMode(modelKey, config) === "image" && config.aspectRatio === "1:1") {
-    config.aspectRatio = "auto";
-  }
+  config.mode = resolveVideoMode(modelKey, config);
 
   if (modelKey === "sora") {
     const validDurations = getSoraDurationOptions(config);

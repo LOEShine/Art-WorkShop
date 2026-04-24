@@ -6,10 +6,26 @@ import {
   normalizeVideoConfig,
   VIDEO_TRANSIENT_KEYS,
 } from "@/data/video-models";
+import {
+  deleteImageHistoryTask,
+  loadImageHistory,
+  loadVideoHistory,
+  saveImageHistoryTask,
+  saveVideoHistoryTask,
+  deleteVideoHistoryTask,
+} from "@/lib/history-db";
+import {
+  readPersistedSettings,
+  writePersistedSettings,
+} from "@/lib/settings-storage";
 import type {
   GenerationMode,
+  ImageConfigRecord,
+  ImageConfigValue,
   ImageModelId,
   ImageTask,
+  VideoConfigRecord,
+  VideoConfigValue,
   VideoModelId,
   VideoTask,
 } from "@/types";
@@ -25,7 +41,6 @@ interface PersistedState {
   imageModelConfigs: ReturnType<typeof createDefaultImageConfigs>;
   selectedVideoModel: VideoModelId;
   videoConfigs: ReturnType<typeof createDefaultVideoConfigs>;
-  history: ImageTask[];
 }
 
 function buildPersistedState(): PersistedState {
@@ -39,12 +54,14 @@ function buildPersistedState(): PersistedState {
     imageModelConfigs,
     selectedVideoModel: "veo3",
     videoConfigs,
-    history: [],
   };
 }
 
 function readPersistedState(): PersistedState {
-  const defaults = buildPersistedState();
+  const defaults = {
+    ...buildPersistedState(),
+    ...readPersistedSettings(),
+  };
 
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -76,9 +93,6 @@ function readPersistedState(): PersistedState {
       ...parsed,
       imageModelConfigs,
       videoConfigs,
-      history: Array.isArray(parsed.history)
-        ? parsed.history.slice(0, HISTORY_LIMIT)
-        : defaults.history,
     };
   } catch {
     return defaults;
@@ -98,19 +112,48 @@ export const useAppStore = defineStore("artWorkshop", {
       prompt: "",
       isGenerating: false,
       currentTask: null as ImageTask | null,
-      history: persisted.history,
+      history: [] as ImageTask[],
+      videoHistory: [] as VideoTask[],
       selectedVideoModel: persisted.selectedVideoModel,
       videoConfigs: persisted.videoConfigs,
       videoTask: null as VideoTask | null,
+      historyHydrated: false,
     };
   },
   actions: {
+    async hydrateHistory() {
+      try {
+        const [imageHistory, videoHistory] = await Promise.all([
+          loadImageHistory(HISTORY_LIMIT),
+          loadVideoHistory(HISTORY_LIMIT),
+        ]);
+        this.history = imageHistory;
+        this.videoHistory = videoHistory;
+      } catch (error) {
+        console.error("[history-db] failed to load history:", error);
+      } finally {
+        this.historyHydrated = true;
+      }
+    },
     persist() {
-      const videoConfigs = structuredClone(this.videoConfigs);
-      (Object.keys(videoConfigs) as VideoModelId[]).forEach((key) => {
-        for (const transientKey of VIDEO_TRANSIENT_KEYS) {
-          delete videoConfigs[key][transientKey];
-        }
+      writePersistedSettings({
+        apiBaseUrl: this.apiBaseUrl,
+        apiKey: this.apiKey,
+      });
+
+      const videoConfigs = {} as PersistedState["videoConfigs"];
+      (Object.keys(this.videoConfigs) as VideoModelId[]).forEach((key) => {
+        const config = this.videoConfigs[key];
+        const plainConfig = {} as VideoConfigRecord;
+
+        Object.entries(config).forEach(([field, value]) => {
+          if (VIDEO_TRANSIENT_KEYS.includes(field as (typeof VIDEO_TRANSIENT_KEYS)[number])) {
+            return;
+          }
+          plainConfig[field] = value;
+        });
+
+        videoConfigs[key] = plainConfig;
       });
 
       const payload: PersistedState = {
@@ -121,9 +164,6 @@ export const useAppStore = defineStore("artWorkshop", {
         imageModelConfigs: this.imageModelConfigs,
         selectedVideoModel: this.selectedVideoModel,
         videoConfigs,
-        history: this.history
-          .slice(0, HISTORY_LIMIT)
-          .map((item) => ({ ...item, sourceImages: [], resultImages: [] })),
       };
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -131,6 +171,10 @@ export const useAppStore = defineStore("artWorkshop", {
     setApiSettings(baseUrl: string, apiKey: string) {
       this.apiBaseUrl = baseUrl.trim().replace(/\/+$/, "") || "https://api.vectorengine.ai";
       this.apiKey = apiKey.trim();
+      writePersistedSettings({
+        apiBaseUrl: this.apiBaseUrl,
+        apiKey: this.apiKey,
+      });
       this.persist();
     },
     setGenerationMode(mode: GenerationMode) {
@@ -141,7 +185,7 @@ export const useAppStore = defineStore("artWorkshop", {
       this.selectedImageModel = model;
       this.persist();
     },
-    setImageModelConfig(model: ImageModelId, key: string, value: string | number | boolean) {
+    setImageModelConfig(model: ImageModelId, key: string, value: ImageConfigValue) {
       this.imageModelConfigs[model] = {
         ...this.imageModelConfigs[model],
         [key]: value,
@@ -169,12 +213,42 @@ export const useAppStore = defineStore("artWorkshop", {
     setCurrentTask(task: ImageTask | null) {
       this.currentTask = task;
     },
-    addHistoryTask(task: ImageTask) {
+    async addHistoryTask(task: ImageTask) {
       this.history = [task, ...this.history].slice(0, HISTORY_LIMIT);
+      try {
+        await saveImageHistoryTask(task, HISTORY_LIMIT);
+      } catch (error) {
+        console.error("[history-db] failed to save image history task:", error);
+      }
       this.persist();
     },
-    removeHistoryTask(taskId: string) {
+    async removeHistoryTask(taskId: string) {
       this.history = this.history.filter((task) => task.id !== taskId);
+      try {
+        await deleteImageHistoryTask(taskId);
+      } catch (error) {
+        console.error("[history-db] failed to delete image history task:", error);
+      }
+      this.persist();
+    },
+    async addVideoHistoryTask(task: VideoTask) {
+      this.videoHistory = [task, ...this.videoHistory]
+        .sort((left, right) => right.createdAt - left.createdAt)
+        .slice(0, HISTORY_LIMIT);
+      try {
+        await saveVideoHistoryTask(task, HISTORY_LIMIT);
+      } catch (error) {
+        console.error("[history-db] failed to save video history task:", error);
+      }
+      this.persist();
+    },
+    async removeVideoHistoryTask(taskId: string) {
+      this.videoHistory = this.videoHistory.filter((task) => task.id !== taskId);
+      try {
+        await deleteVideoHistoryTask(taskId);
+      } catch (error) {
+        console.error("[history-db] failed to delete video history task:", error);
+      }
       this.persist();
     },
     continueWithResult(image: string) {
@@ -193,23 +267,26 @@ export const useAppStore = defineStore("artWorkshop", {
       this.prompt = task.prompt;
       this.persist();
     },
+    loadVideoTaskConfig(task: VideoTask) {
+      this.generationMode = "video";
+      this.selectedVideoModel = task.modelKey;
+      this.videoConfigs[task.modelKey] = {
+        ...this.videoConfigs[task.modelKey],
+        ...(task.modelConfig || {}),
+      };
+      normalizeVideoConfig(task.modelKey, this.videoConfigs[task.modelKey]);
+      this.prompt = task.prompt || "";
+      this.persist();
+    },
     setSelectedVideoModel(model: VideoModelId) {
       this.selectedVideoModel = model;
       normalizeVideoConfig(model, this.videoConfigs[model]);
       this.persist();
     },
-    setVideoField(field: string, value: string | number | boolean) {
+    setVideoField(field: string, value: VideoConfigValue) {
       const config = this.videoConfigs[this.selectedVideoModel];
       if (!config) {
         return;
-      }
-
-      if (field === "primaryImageSource" && value && config.mode === "text") {
-        config.mode = "image";
-      }
-
-      if (field === "lastFrameSource" && value) {
-        config.mode = "first-last";
       }
 
       config[field] = value;
@@ -229,7 +306,7 @@ export const useAppStore = defineStore("artWorkshop", {
     },
     setVideoTask(task: VideoTask | null) {
       this.videoTask = task;
+      this.persist();
     },
   },
 });
-

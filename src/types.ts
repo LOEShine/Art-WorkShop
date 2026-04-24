@@ -7,8 +7,12 @@ export type ImageModelId =
 
 export type VideoModelId = "veo3" | "hailuo" | "seedance" | "sora";
 export type VideoMode = "text" | "image" | "first-last";
+export type ImageConfigValue = string | number | boolean;
+export type VideoConfigValue = ImageConfigValue | string[];
+export type ImageConfigRecord = Record<string, ImageConfigValue>;
+export type VideoConfigRecord = Record<string, VideoConfigValue>;
 
-export interface SelectOption<T extends string | number | boolean = string | number | boolean> {
+export interface SelectOption<T extends ImageConfigValue = ImageConfigValue> {
   value: T;
   label: string;
 }
@@ -17,7 +21,7 @@ export interface ImageModelField {
   key: string;
   label: string;
   options: SelectOption[];
-  default: string | number | boolean;
+  default: ImageConfigValue;
   preview?: boolean;
   compact?: boolean;
 }
@@ -54,7 +58,7 @@ export interface ImageTask {
   sourceImages: string[];
   prompt: string;
   model: ImageModelId;
-  modelConfig: Record<string, string | number | boolean>;
+  modelConfig: ImageConfigRecord;
   resultImages: string[];
   generationTime: number;
   error?: string;
@@ -64,11 +68,18 @@ export interface VideoTask {
   id: string;
   modelKey: VideoModelId;
   modelTitle: string;
+  prompt?: string;
+  modelConfig?: VideoConfigRecord;
+  sourceImages?: string[];
   status: string;
   phase: "pending" | "success" | "error";
   progress: string;
   error: string;
   videoUrl: string;
+  videoBlob?: Blob;
+  videoMimeType?: string;
+  videoFileName?: string;
+  remoteVideoUrl?: string;
   createdAt: number;
   updatedAt: number;
   responseUrl?: string;
@@ -89,6 +100,9 @@ export interface VideoModelMeta {
   iconSvg?: string;
 }
 
-export type ImageModelConfigs = Record<ImageModelId, Record<string, string | number | boolean>>;
-export type VideoModelConfigs = Record<VideoModelId, Record<string, string | number | boolean>>;
+export type ImageModelConfigs = Record<ImageModelId, ImageConfigRecord>;
+export type VideoModelConfigs = Record<VideoModelId, VideoConfigRecord>;
 
+export type GalleryHistoryItem =
+  | ({ kind: "image" } & ImageTask)
+  | ({ kind: "video" } & VideoTask);
