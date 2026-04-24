@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Art Workshop Auto Deploy Every Minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=art-workshop-deploy.service
+
+[Install]
+WantedBy=timers.target

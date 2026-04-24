@@ -1,0 +1,13 @@
+[Unit]
+Description=Art Workshop Auto Deploy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=REPO_URL=https://github.com/LOEShine/Art-WorkShop.git
+Environment=BRANCH=main
+Environment=APP_DIR=/opt/art-workshop
+Environment=DEPLOY_DIR=/www/wwwroot/ai
+ExecStart=/usr/local/bin/art-workshop-autodeploy.sh
+
