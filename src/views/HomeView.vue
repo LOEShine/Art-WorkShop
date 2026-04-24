@@ -92,6 +92,14 @@ function getImageModelIcon(modelId: string) {
   return OpenAiIcon;
 }
 
+function getVideoModelIcon(modelKey: string) {
+  if (modelKey === "sora") {
+    return OpenAiIcon;
+  }
+
+  return null;
+}
+
 function getVideoBadgeIcon(badge: string) {
   if (badge === "text") return TypeIcon;
   if (badge === "image") return ImageIcon;
@@ -1307,8 +1315,13 @@ onBeforeUnmount(() => {
                     :class="store.selectedVideoModel === model.key ? 'bg-primary text-primary-foreground' : 'hover:bg-accent hover:text-accent-foreground'"
                     @click="store.setSelectedVideoModel(model.key)"
                   >
+                    <component
+                      :is="getVideoModelIcon(model.key)"
+                      v-if="getVideoModelIcon(model.key)"
+                      class="h-4 w-4 shrink-0"
+                    />
                     <span
-                      v-if="model.iconSvg"
+                      v-else-if="model.iconSvg"
                       class="inline-flex h-4 w-4 shrink-0 items-center justify-center [&_svg]:h-4 [&_svg]:w-4"
                       v-html="model.iconSvg"
                     />
