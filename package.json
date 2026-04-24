@@ -10,7 +10,10 @@
     "extract:reference": "node scripts/extract-reference-data.mjs"
   },
   "dependencies": {
+    "@fontsource/caveat": "^5.2.8",
+    "@fontsource/inter": "^5.2.8",
     "idb": "^8.0.3",
+    "lucide-vue-next": "^1.0.0",
     "pinia": "^3.0.4",
     "vue": "^3.5.33",
     "vue-router": "^5.0.6"

@@ -37,6 +37,14 @@ export const VIDEO_MODELS: Record<VideoModelId, VideoModelMeta> = {
     desc: "文生/图生/首尾帧视频。",
     detail: "基于 VectorEngine 文档中的豆包 Seedance 接口。",
     docsUrl: "https://vectorengine.apifox.cn/api-358028488",
+    iconSvg: `
+      <svg viewBox="0 0 1170 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M0 968.175058l197.847012-50.485503V105.300006L0 54.697503v913.536055z" fill="#2F57C2"></path>
+        <path d="M968.175058 0v1018.719061l202.117512-50.485503V54.697503L968.233558 0z" fill="#78DED4"></path>
+        <path d="M648.297039 378.904523l202.059012-50.544003v534.631531l-202.059012-50.544003V378.904523z" fill="#3A8DDE"></path>
+        <path d="M315.724519 458.874027l202.059012 50.485503v433.602026l-202.059012 54.697503v-538.785032z" fill="#1ECAD3"></path>
+      </svg>
+    `,
     badges: ["text", "image", "first-last"],
   },
   sora: {
@@ -220,4 +228,3 @@ export function normalizeVideoConfig(
     }
   }
 }
-

@@ -1,7 +1,29 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import {
+  BookOpen,
+  Bot,
+  Clock,
+  Copy,
+  Cpu,
+  Download,
+  Image as ImageIcon,
+  LoaderCircle,
+  Pencil,
+  Plus,
+  Settings,
+  Sparkles,
+  StepForward,
+  Trash2,
+  Type as TypeIcon,
+  Upload,
+  Volume2,
+  WandSparkles,
+  X,
+} from "lucide-vue-next";
 
+import OpenAiIcon from "@/components/icons/OpenAiIcon.vue";
 import MediaModal from "@/components/MediaModal.vue";
 import SettingsModal from "@/components/SettingsModal.vue";
 import {
@@ -61,6 +83,30 @@ const promptTextarea = ref<HTMLTextAreaElement | null>(null);
 
 let imageTimer: number | undefined;
 let videoPollTimer: number | undefined;
+
+function getImageModelIcon(modelId: string) {
+  if (modelId === "gemini-3-pro-image-preview") {
+    return null;
+  }
+
+  return OpenAiIcon;
+}
+
+function getVideoBadgeIcon(badge: string) {
+  if (badge === "text") return TypeIcon;
+  if (badge === "image") return ImageIcon;
+  if (badge === "audio") return Volume2;
+  if (badge === "first-last") return StepForward;
+  return null;
+}
+
+function getVideoBadgeLabel(badge: string) {
+  if (badge === "text") return "文生视频";
+  if (badge === "image") return "图生视频";
+  if (badge === "audio") return "音频";
+  if (badge === "first-last") return "首尾帧";
+  return badge;
+}
 
 const currentImageModel = computed(
   () => IMAGE_MODELS.find((model) => model.id === store.selectedImageModel) ?? IMAGE_MODELS[0],
@@ -812,8 +858,8 @@ onBeforeUnmount(() => {
             class="h-6 w-6"
           />
           <h1
-            class="text-2xl font-bold"
-            style="font-family: Caveat, cursive"
+            class="text-2xl font-bold leading-none"
+            style="font-family: 'Caveat', cursive"
           >
             Art Workshop
           </h1>
@@ -825,7 +871,7 @@ onBeforeUnmount(() => {
             class="inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
             @click="openPromptLibrary"
           >
-            <span>🗂</span>
+            <BookOpen class="h-4 w-4" />
             <span class="hidden sm:inline">提示词库</span>
           </button>
 
@@ -834,7 +880,7 @@ onBeforeUnmount(() => {
             class="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-accent-foreground"
             @click="settingsOpen = true"
           >
-            ⚙
+            <Settings class="h-5 w-5" />
           </button>
         </div>
       </div>
@@ -870,7 +916,7 @@ onBeforeUnmount(() => {
             <div class="space-y-6 p-6 pt-0">
               <div class="space-y-3">
                 <div class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                  <span>🤖</span>
+                  <Bot class="h-4 w-4" />
                   <span>模型选择</span>
                 </div>
 
@@ -883,7 +929,17 @@ onBeforeUnmount(() => {
                     :class="store.selectedImageModel === model.id ? 'bg-primary text-primary-foreground' : 'hover:bg-accent hover:text-accent-foreground'"
                     @click="store.setSelectedImageModel(model.id)"
                   >
-                    <span class="shrink-0">{{ model.id === 'gemini-3-pro-image-preview' ? '🍌' : '◎' }}</span>
+                    <component
+                      :is="getImageModelIcon(model.id)"
+                      v-if="getImageModelIcon(model.id)"
+                      class="h-4 w-4 shrink-0"
+                    />
+                    <span
+                      v-else
+                      class="shrink-0 text-base leading-none"
+                    >
+                      🍌
+                    </span>
                     <span>{{ model.name }}</span>
                   </button>
                 </div>
@@ -892,7 +948,7 @@ onBeforeUnmount(() => {
               <div class="border-t pt-4">
                 <div class="mb-3 flex items-center justify-between">
                   <div class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                    <span>🖼</span>
+                    <Upload class="h-4 w-4" />
                     <span>参考图片</span>
                     <span class="text-xs text-muted-foreground/60">(最多{{ currentImageUploadLimit }}张)</span>
                   </div>
@@ -920,7 +976,7 @@ onBeforeUnmount(() => {
                   @drop="handleImageDrop"
                   @dragover="handleImageDragOver"
                 >
-                  <span class="text-3xl text-muted-foreground/50">🖼</span>
+                  <ImageIcon class="h-8 w-8 text-muted-foreground/50" />
                   <div class="text-center text-sm text-muted-foreground">
                     <p>拖拽图片到此处</p>
                     <p class="text-xs">或点击上传 / Ctrl+V 粘贴</p>
@@ -947,7 +1003,7 @@ onBeforeUnmount(() => {
                       class="absolute right-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100"
                       @click.stop="store.removeUploadedImage(index)"
                     >
-                      ×
+                      <X class="h-3 w-3" />
                     </button>
                   </div>
 
@@ -957,7 +1013,7 @@ onBeforeUnmount(() => {
                     class="flex h-16 w-16 items-center justify-center rounded-md border-2 border-dashed border-muted-foreground/25 bg-muted/50 transition-colors hover:border-muted-foreground/50 hover:bg-muted"
                     @click="pickImageFiles"
                   >
-                    ＋
+                    <Plus class="h-5 w-5 text-muted-foreground" />
                   </button>
                 </div>
               </div>
@@ -1048,6 +1104,7 @@ onBeforeUnmount(() => {
                       :disabled="optimizingPrompt"
                       @click="handleOptimizePrompt"
                     >
+                      <WandSparkles class="h-3.5 w-3.5" />
                       <span>{{ optimizingPrompt ? "优化中" : store.prompt.trim() ? "提示词优化" : "随机生成" }}</span>
                     </button>
                   </div>
@@ -1060,6 +1117,14 @@ onBeforeUnmount(() => {
                   :disabled="!canGenerateImage"
                   @click="handleGenerateImage"
                 >
+                  <LoaderCircle
+                    v-if="store.isGenerating"
+                    class="h-4 w-4 animate-spin"
+                  />
+                  <Sparkles
+                    v-else
+                    class="h-4 w-4"
+                  />
                   {{ store.isGenerating ? "生成中..." : "开始生成" }}
                 </button>
               </div>
@@ -1073,7 +1138,7 @@ onBeforeUnmount(() => {
             <div class="p-6 pt-0">
               <div class="flex h-full flex-col space-y-4">
                 <div class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                  <span>🖼</span>
+                  <ImageIcon class="h-4 w-4" />
                   <span>生成结果</span>
                 </div>
 
@@ -1091,7 +1156,7 @@ onBeforeUnmount(() => {
                   class="flex aspect-video items-center justify-center rounded-md bg-muted"
                 >
                   <div class="text-center">
-                    <div class="mx-auto mb-2 h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                    <LoaderCircle class="mx-auto mb-2 h-8 w-8 animate-spin text-primary" />
                     <p class="text-sm text-muted-foreground">生成中...</p>
                     <p class="mt-1 font-mono text-xs text-muted-foreground">
                       {{ formatElapsed(currentImageElapsed) }}
@@ -1121,22 +1186,28 @@ onBeforeUnmount(() => {
                           class="inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
                           @click.stop="store.continueWithResult(image)"
                         >
-                          ↺
+                          <Pencil class="h-4 w-4" />
                         </button>
                         <button
                           type="button"
                           class="inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
                           @click.stop="downloadImage(image, index)"
                         >
-                          ↓
+                          <Download class="h-4 w-4" />
                         </button>
                       </div>
                     </div>
                   </div>
 
                   <div class="flex items-center gap-3 text-xs text-muted-foreground">
-                    <span>{{ currentImageModel.name }}</span>
-                    <span>{{ formatElapsed(store.currentTask.generationTime) }}</span>
+                    <span class="flex items-center gap-1">
+                      <Cpu class="h-3 w-3" />
+                      {{ currentImageModel.name }}
+                    </span>
+                    <span class="flex items-center gap-1">
+                      <Clock class="h-3 w-3" />
+                      {{ formatElapsed(store.currentTask.generationTime) }}
+                    </span>
                   </div>
                 </div>
 
@@ -1189,7 +1260,7 @@ onBeforeUnmount(() => {
                   title="加载配置"
                   @click.stop="store.loadTaskConfig(task)"
                 >
-                  ↧
+                  <Copy class="h-3 w-3" />
                 </button>
                 <button
                   type="button"
@@ -1197,7 +1268,7 @@ onBeforeUnmount(() => {
                   title="继续编辑"
                   @click.stop="store.continueWithResult(task.resultImages[0])"
                 >
-                  ↺
+                  <Pencil class="h-3 w-3" />
                 </button>
                 <button
                   type="button"
@@ -1205,7 +1276,7 @@ onBeforeUnmount(() => {
                   title="删除"
                   @click.stop="store.removeHistoryTask(task.id)"
                 >
-                  ×
+                  <Trash2 class="h-3 w-3" />
                 </button>
               </div>
             </article>
@@ -1223,7 +1294,7 @@ onBeforeUnmount(() => {
             <div class="space-y-6 p-6 pt-0">
               <div class="space-y-3">
                 <div class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                  <span>🎬</span>
+                  <Bot class="h-4 w-4" />
                   <span>模型选择</span>
                 </div>
 
@@ -1236,22 +1307,37 @@ onBeforeUnmount(() => {
                     :class="store.selectedVideoModel === model.key ? 'bg-primary text-primary-foreground' : 'hover:bg-accent hover:text-accent-foreground'"
                     @click="store.setSelectedVideoModel(model.key)"
                   >
+                    <span
+                      v-if="model.iconSvg"
+                      class="inline-flex h-4 w-4 shrink-0 items-center justify-center [&_svg]:h-4 [&_svg]:w-4"
+                      v-html="model.iconSvg"
+                    />
                     <img
-                      v-if="model.iconSrc"
+                      v-else-if="model.iconSrc"
                       :src="model.iconSrc"
                       :alt="model.title"
-                      class="h-4 w-4 object-contain"
+                      class="h-4 w-4 shrink-0 object-contain"
                     />
-                    <span v-else>▶</span>
                     <span class="min-w-0 shrink-0 text-left font-medium">{{ model.title }}</span>
                     <span class="flex shrink-0 items-center gap-1.5">
-                      <span
+                      <template
                         v-for="badge in model.badges"
                         :key="badge"
-                        class="text-xs"
                       >
-                        {{ badge === 'text' ? 'T' : badge === 'image' ? 'I' : badge === 'audio' ? 'A' : 'F' }}
-                      </span>
+                        <component
+                          :is="getVideoBadgeIcon(badge)"
+                          v-if="getVideoBadgeIcon(badge)"
+                          class="h-3.5 w-3.5"
+                          :title="getVideoBadgeLabel(badge)"
+                          :aria-label="getVideoBadgeLabel(badge)"
+                        />
+                        <span
+                          v-else
+                          class="text-xs"
+                        >
+                          {{ getVideoBadgeLabel(badge) }}
+                        </span>
+                      </template>
                     </span>
                   </button>
                 </div>
@@ -1263,7 +1349,7 @@ onBeforeUnmount(() => {
               >
                 <div class="mb-3 flex items-center justify-between">
                   <div class="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                    <span>🖼</span>
+                    <Upload class="h-4 w-4" />
                     <span>参考图片</span>
                   </div>
                   <span class="text-xs text-muted-foreground">(最多{{ currentVideoUploadLimit }}张)</span>
@@ -1330,7 +1416,7 @@ onBeforeUnmount(() => {
                         </template>
 
                         <template v-else>
-                          <span class="mb-2 text-3xl text-muted-foreground/50">🖼</span>
+                          <ImageIcon class="mb-2 h-8 w-8 text-muted-foreground/50" />
                           <p class="text-sm text-muted-foreground">等待上传</p>
                           <p class="text-xs text-muted-foreground">点击上传 / 拖拽 / Ctrl+V 粘贴</p>
                         </template>

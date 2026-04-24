@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { Download, Pencil, X } from "lucide-vue-next";
+
 defineProps<{
   open: boolean;
   src: string;
@@ -34,7 +36,7 @@ const emit = defineEmits<{
           class="inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
           @click="emit('close')"
         >
-          ×
+          <X class="h-5 w-5" />
         </button>
       </div>
 
@@ -48,6 +50,7 @@ const emit = defineEmits<{
           class="inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
           @click.stop="emit('continue')"
         >
+          <Pencil class="h-4 w-4" />
           继续修改
         </button>
         <button
@@ -56,6 +59,7 @@ const emit = defineEmits<{
           class="inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
           @click.stop="emit('download')"
         >
+          <Download class="h-4 w-4" />
           下载
         </button>
       </div>
@@ -69,4 +73,3 @@ const emit = defineEmits<{
     </div>
   </div>
 </template>
-

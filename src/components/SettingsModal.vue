@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { Check, Eye, EyeOff, Key, LoaderCircle, Server, TestTube, X } from "lucide-vue-next";
 
 import { buildApiUrl } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
@@ -94,13 +95,16 @@ async function handleTest() {
           class="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent"
           @click="emit('close')"
         >
-          ×
+          <X class="h-4 w-4" />
         </button>
       </div>
 
       <div class="space-y-4">
         <div class="space-y-2">
-          <label class="text-sm font-medium">API 地址</label>
+          <label class="flex items-center gap-2 text-sm font-medium">
+            <Server class="h-4 w-4" />
+            API 地址
+          </label>
           <input
             v-model="apiBaseUrl"
             type="text"
@@ -110,7 +114,10 @@ async function handleTest() {
         </div>
 
         <div class="space-y-2">
-          <label class="text-sm font-medium">API Key</label>
+          <label class="flex items-center gap-2 text-sm font-medium">
+            <Key class="h-4 w-4" />
+            API Key
+          </label>
           <div class="relative">
             <input
               v-model="apiKey"
@@ -123,7 +130,14 @@ async function handleTest() {
               class="absolute right-0 top-0 inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent"
               @click="showApiKey = !showApiKey"
             >
-              {{ showApiKey ? "隐" : "显" }}
+              <EyeOff
+                v-if="showApiKey"
+                class="h-4 w-4"
+              />
+              <Eye
+                v-else
+                class="h-4 w-4"
+              />
             </button>
           </div>
         </div>
@@ -134,6 +148,7 @@ async function handleTest() {
             class="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow transition-colors hover:bg-primary/90"
             @click="handleSave"
           >
+            <Check class="h-4 w-4" />
             保存配置
           </button>
 
@@ -143,6 +158,14 @@ async function handleTest() {
             :disabled="isTesting"
             @click="handleTest"
           >
+            <LoaderCircle
+              v-if="isTesting"
+              class="h-4 w-4 animate-spin"
+            />
+            <TestTube
+              v-else
+              class="h-4 w-4"
+            />
             {{ isTesting ? "测试中..." : "测试连接" }}
           </button>
 
@@ -150,14 +173,23 @@ async function handleTest() {
             v-if="saved"
             class="rounded-md bg-green-500/10 p-2 text-sm text-green-500"
           >
+            <Check class="mr-2 inline h-4 w-4" />
             配置已保存！
           </div>
 
           <div
             v-if="testStatus"
-            class="rounded-md p-2 text-sm"
+            class="flex items-center rounded-md p-2 text-sm"
             :class="testStatus === 'success' ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'"
           >
+            <Check
+              v-if="testStatus === 'success'"
+              class="mr-2 h-4 w-4"
+            />
+            <X
+              v-else
+              class="mr-2 h-4 w-4"
+            />
             {{ testMessage }}
           </div>
         </div>
@@ -172,4 +204,3 @@ async function handleTest() {
     </div>
   </div>
 </template>
-

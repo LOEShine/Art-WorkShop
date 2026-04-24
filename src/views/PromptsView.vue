@@ -1,6 +1,16 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
+import {
+  ArrowRight,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  ExternalLink,
+  Search,
+  Sparkles,
+} from "lucide-vue-next";
 
 import MediaModal from "@/components/MediaModal.vue";
 import { PROMPT_CATEGORIES, PROMPT_LIBRARY } from "@/data/reference";
@@ -69,8 +79,8 @@ function backToCreate() {
               class="h-6 w-6"
             />
             <h1
-              class="text-2xl font-bold"
-              style="font-family: Caveat, cursive"
+              class="text-2xl font-bold leading-none"
+              style="font-family: 'Caveat', cursive"
             >
               Art Workshop
             </h1>
@@ -84,6 +94,7 @@ function backToCreate() {
           class="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           @click="backToCreate"
         >
+          <Sparkles class="h-4 w-4" />
           开始创作
         </button>
       </div>
@@ -117,7 +128,7 @@ function backToCreate() {
 
       <div class="mb-6 space-y-4">
         <div class="relative mx-auto max-w-md">
-          <span class="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">⌕</span>
+          <Search class="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <input
             v-model="keyword"
             type="text"
@@ -225,6 +236,14 @@ function backToCreate() {
               class="mt-2 flex w-full items-center justify-center gap-1 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
               @click="expandedPromptId = expandedPromptId === item.id ? null : item.id"
             >
+              <ChevronUp
+                v-if="expandedPromptId === item.id"
+                class="h-3 w-3"
+              />
+              <ChevronDown
+                v-else
+                class="h-3 w-3"
+              />
               {{ expandedPromptId === item.id ? "收起" : "展开全部" }}
             </button>
           </div>
@@ -235,6 +254,14 @@ function backToCreate() {
               class="flex flex-1 items-center justify-center gap-1.5 py-2.5 text-sm transition-colors hover:bg-muted"
               @click="copyPrompt(item.id, item.prompt)"
             >
+              <Check
+                v-if="copiedPromptId === item.id"
+                class="h-4 w-4 text-green-500"
+              />
+              <Copy
+                v-else
+                class="h-4 w-4"
+              />
               <span :class="copiedPromptId === item.id ? 'text-green-500' : ''">
                 {{ copiedPromptId === item.id ? "已复制" : "复制" }}
               </span>
@@ -245,6 +272,7 @@ function backToCreate() {
               class="flex flex-1 items-center justify-center gap-1.5 py-2.5 text-sm text-primary transition-colors hover:bg-primary/5"
               @click="usePrompt(item.prompt)"
             >
+              <ArrowRight class="h-4 w-4" />
               使用
             </button>
           </div>
@@ -282,6 +310,7 @@ function backToCreate() {
             class="flex items-center gap-1 transition-colors hover:text-primary"
           >
             awesome-nanobanana-pro
+            <ExternalLink class="h-3 w-3" />
           </a>
           <a
             href="https://github.com/ZHO-ZHO-ZHO/Nano-Bananary"
@@ -290,6 +319,7 @@ function backToCreate() {
             class="flex items-center gap-1 transition-colors hover:text-primary"
           >
             Nano-Bananary
+            <ExternalLink class="h-3 w-3" />
           </a>
         </div>
       </div>
