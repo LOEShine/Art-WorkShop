@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   LoaderCircle,
   Pencil,
+  Play,
   Plus,
   Settings,
   Sparkles,
@@ -35,6 +36,8 @@ import {
 import { STARTER_PROMPTS } from "@/data/starter-prompts";
 import {
   createDefaultVideoConfigs,
+  getHailuoDurationOptions,
+  getSeedanceDurationOptions,
   getVeoReferenceImageNames,
   getVeoReferenceImages,
   getSoraDurationOptions,
@@ -42,6 +45,7 @@ import {
   isFirstLastFramesEnabled,
   MAX_VEO_REFERENCE_IMAGES,
   resolveVideoMode,
+  SEEDANCE_RATIO_OPTIONS,
   supportsFirstLastFrames,
   VIDEO_MODELS,
 } from "@/data/video-models";
@@ -100,6 +104,7 @@ const previewCanContinue = ref(false);
 const currentImageElapsed = ref(0);
 const currentVideoElapsed = ref(0);
 const historyImageResolutionLabels = ref<Record<string, string>>({});
+const historyVideoResolutionLabels = ref<Record<string, string>>({});
 const historyVideoDurationLabels = ref<Record<string, string>>({});
 const optimizingPrompt = ref(false);
 const submittingVideo = ref(false);
@@ -227,23 +232,24 @@ const currentVideoFields = computed<DynamicField[]>(() => {
   }
 
   if (store.selectedVideoModel === "hailuo") {
+    const hailuoDurationOptions = getHailuoDurationOptions(config);
     return [
-      {
-        key: "duration",
-        label: "时长",
-        type: "choice",
-        columns: "grid-cols-2",
-        options: [
-          { value: "6", label: "6" },
-          { value: "10", label: "10" },
-        ],
-      },
       {
         key: "resolution",
         label: "分辨率",
         type: "choice",
-        columns: "grid-cols-1",
-        options: [{ value: "768P", label: "768P" }],
+        columns: "grid-cols-2",
+        options: [
+          { value: "768P", label: "768P" },
+          { value: "1080P", label: "1080P" },
+        ],
+      },
+      {
+        key: "duration",
+        label: "时长",
+        type: "choice",
+        columns: hailuoDurationOptions.length === 1 ? "grid-cols-1" : "grid-cols-2",
+        options: hailuoDurationOptions.map((value) => ({ value, label: `${value}s` })),
       },
       {
         key: "promptOptimizer",
@@ -266,104 +272,60 @@ const currentVideoFields = computed<DynamicField[]>(() => {
 
   if (store.selectedVideoModel === "seedance") {
     return [
-      ...(currentVideoMode.value !== "first-last"
-        ? [
-            {
-              key: "ratio",
-              label: "比例",
-              type: "choice" as const,
-              columns: "grid-cols-3",
-              options: [
-                { value: "21:9", label: "21:9" },
-                { value: "16:9", label: "16:9" },
-                { value: "4:3", label: "4:3" },
-                { value: "1:1", label: "1:1" },
-                { value: "3:4", label: "3:4" },
-                { value: "9:16", label: "9:16" },
-                { value: "9:21", label: "9:21" },
-                { value: "keep_ratio", label: "保持原比例" },
-                { value: "adaptive", label: "自适应" },
-              ],
-            },
-            {
-              key: "duration",
-              label: "时长",
-              type: "choice" as const,
-              columns: "grid-cols-2",
-              options: [
-                { value: "5", label: "5" },
-                { value: "10", label: "10" },
-              ],
-            },
-            {
-              key: "resolution",
-              label: "分辨率",
-              type: "choice" as const,
-              columns: "grid-cols-3",
-              options: [
-                { value: "480p", label: "480p" },
-                { value: "720p", label: "720p" },
-                { value: "1080p", label: "1080p" },
-              ],
-            },
-            {
-              key: "framespersecond",
-              label: "帧率",
-              type: "choice" as const,
-              columns: "grid-cols-2",
-              options: [
-                { value: "16", label: "16" },
-                { value: "24", label: "24" },
-              ],
-            },
-            {
-              key: "seed",
-              label: "随机种子",
-              type: "text" as const,
-              placeholder: "可选，整数 seed",
-            },
-            {
-              key: "camerafixed",
-              label: "固定镜头",
-              type: "choice" as const,
-              columns: "grid-cols-2",
-              options: [
-                { value: false, label: "关闭" },
-                { value: true, label: "开启" },
-              ],
-            },
-            {
-              key: "watermark",
-              label: "水印",
-              type: "choice" as const,
-              columns: "grid-cols-2",
-              options: [
-                { value: false, label: "关闭" },
-                { value: true, label: "开启" },
-              ],
-            },
-            {
-              key: "generateAudio",
-              label: "生成音频",
-              type: "choice" as const,
-              columns: "grid-cols-2",
-              options: [
-                { value: false, label: "关闭" },
-                { value: true, label: "开启" },
-              ],
-            },
-            {
-              key: "returnLastFrame",
-              label: "返回末帧",
-              type: "choice" as const,
-              columns: "grid-cols-2",
-              options: [
-                { value: false, label: "关闭" },
-                { value: true, label: "开启" },
-              ],
-            },
-          ]
-        : []),
+      {
+        key: "resolution",
+        label: "分辨率",
+        type: "choice" as const,
+        compact: true,
+        buttonWidthPx: 92,
+        options: [
+          { value: "480p", label: "480p" },
+          { value: "720p", label: "720p" },
+          { value: "1080p", label: "1080p" },
+        ],
+      },
+      {
+        key: "ratio",
+        label: "比例",
+        type: "choice" as const,
+        compact: true,
+        preview: true,
+        buttonWidthPx: 78,
+        options: SEEDANCE_RATIO_OPTIONS.map((value) => ({
+          value,
+          label: value === "adaptive" ? "自适应" : value,
+        })),
+      },
+      {
+        key: "duration",
+        label: "时长",
+        type: "choice" as const,
+        compact: true,
+        buttonWidthPx: 52,
+        options: getSeedanceDurationOptions().map((value) => ({ value, label: `${value}s` })),
+      },
+      {
+        key: "generateAudio",
+        label: "音频",
+        type: "choice" as const,
+        compact: true,
+        buttonWidthPx: 72,
+        options: [
+          { value: true, label: "开启" },
+          { value: false, label: "关闭" },
+        ],
+      },
+      {
+        key: "camerafixed",
+        label: "固定镜头",
+        type: "choice" as const,
+        compact: true,
+        buttonWidthPx: 72,
+        options: [
+          { value: false, label: "关闭" },
+          { value: true, label: "开启" },
+        ],
+      },
       {
         key: "prompt",
         label: "提示词",
@@ -402,6 +364,27 @@ const currentVideoFields = computed<DynamicField[]>(() => {
 
 const currentVideoFieldRows = computed<DynamicField[][]>(() => {
   const fields = currentVideoFields.value;
+
+  if (store.selectedVideoModel === "seedance") {
+    const generateAudioField = fields.find((field) => field.key === "generateAudio");
+    const cameraFixedField = fields.find((field) => field.key === "camerafixed");
+    if (!generateAudioField || !cameraFixedField) {
+      return fields.map((field) => [field]);
+    }
+
+    return fields.reduce<DynamicField[][]>((rows, field) => {
+      if (field.key === "generateAudio") {
+        rows.push([generateAudioField, cameraFixedField]);
+        return rows;
+      }
+
+      if (field.key !== "camerafixed") {
+        rows.push([field]);
+      }
+
+      return rows;
+    }, []);
+  }
 
   if (store.selectedVideoModel !== "veo3") {
     return fields.map((field) => [field]);
@@ -525,14 +508,22 @@ function setHistoryVideoDurationLabel(task: GalleryHistoryItem, event: Event) {
 
   const video = event.target as HTMLVideoElement;
   const label = formatVideoSeconds(video.duration);
-  if (!label) {
-    return;
+  const resolution = video.videoWidth && video.videoHeight ? `${video.videoWidth}×${video.videoHeight}` : "";
+  const historyKey = getGalleryHistoryKey(task);
+
+  if (label) {
+    historyVideoDurationLabels.value = {
+      ...historyVideoDurationLabels.value,
+      [historyKey]: label,
+    };
   }
 
-  historyVideoDurationLabels.value = {
-    ...historyVideoDurationLabels.value,
-    [getGalleryHistoryKey(task)]: label,
-  };
+  if (resolution) {
+    historyVideoResolutionLabels.value = {
+      ...historyVideoResolutionLabels.value,
+      [historyKey]: resolution,
+    };
+  }
 }
 
 function formatImageResolutionLabel(task: ImageTask) {
@@ -571,6 +562,16 @@ function formatVideoDurationLabel(task: VideoTask) {
   }
 
   return duration.endsWith("s") ? duration : `${duration}s`;
+}
+
+function formatVideoResolutionLabel(task: VideoTask) {
+  const historyKey = `video-${task.id}`;
+  const actualResolution = historyVideoResolutionLabels.value[historyKey];
+  if (actualResolution) {
+    return actualResolution;
+  }
+
+  return String(task.modelConfig?.resolution || "").trim();
 }
 
 function getVeoExtensionCount(task?: VideoTask | null) {
@@ -821,7 +822,8 @@ function getAspectPreviewSize(text: string) {
   const match = normalized.match(/(\d+)\s*[×x:]\s*(\d+)/i);
 
   if (!match) {
-    if (normalized === "自动" || normalized.toLowerCase() === "auto") {
+    const lower = normalized.toLowerCase();
+    if (normalized === "自动" || lower === "auto" || lower === "adaptive") {
       return { width: 12, height: 12 };
     }
     return null;
@@ -1531,23 +1533,31 @@ onBeforeUnmount(() => {
     </header>
 
     <main class="mx-auto max-w-7xl px-4 py-6">
-      <div class="mb-6 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          class="inline-flex h-8 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
-          :class="store.generationMode === 'image' ? 'bg-primary text-primary-foreground shadow' : 'border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground'"
-          @click="store.setGenerationMode('image')"
+      <div class="mb-6 flex justify-center">
+        <div
+          class="mode-switch"
+          :data-mode="store.generationMode"
         >
-          图片生成
-        </button>
-        <button
-          type="button"
-          class="inline-flex h-8 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition-colors"
-          :class="store.generationMode === 'video' ? 'bg-primary text-primary-foreground shadow' : 'border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground'"
-          @click="store.setGenerationMode('video')"
-        >
-          视频生成
-        </button>
+          <div class="mode-switch-thumb" />
+          <button
+            type="button"
+            class="mode-switch-button"
+            :class="store.generationMode === 'image' ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            @click="store.setGenerationMode('image')"
+          >
+            <ImageIcon class="h-4 w-4" />
+            图片
+          </button>
+          <button
+            type="button"
+            class="mode-switch-button"
+            :class="store.generationMode === 'video' ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            @click="store.setGenerationMode('video')"
+          >
+            <Video class="h-4 w-4" />
+            视频
+          </button>
+        </div>
       </div>
 
       <template v-if="store.generationMode === 'image'">
@@ -1695,13 +1705,13 @@ onBeforeUnmount(() => {
 
                   <div
                     v-if="field.preview"
-                    class="grid grid-cols-5 gap-1.5"
+                    class="image-option-grid image-option-grid--preview"
                   >
                     <button
                       v-for="option in field.options"
                       :key="String(option.value)"
                       type="button"
-                      class="flex flex-col items-center rounded-md py-2 transition-all"
+                      class="image-option-button image-option-button--preview"
                       :class="currentImageConfig[field.key] === option.value ? 'bg-blue-500 text-white' : 'bg-muted/50 text-muted-foreground hover:bg-muted'"
                       @click="store.setImageModelConfig(store.selectedImageModel, field.key, option.value)"
                     >
@@ -1711,19 +1721,19 @@ onBeforeUnmount(() => {
                           :style="aspectPreviewStyle(option.value)"
                         />
                       </div>
-                      <span class="mt-1 text-[10px] font-medium">{{ option.label }}</span>
+                      <span class="image-option-label mt-1 text-[10px] font-medium">{{ option.label }}</span>
                     </button>
                   </div>
 
                   <div
                     v-else-if="field.compact"
-                    class="flex gap-2 overflow-x-auto"
+                    class="image-option-grid image-option-grid--compact"
                   >
                     <button
                       v-for="option in field.options"
                       :key="String(option.value)"
                       type="button"
-                      class="rounded-lg px-3 py-2.5 text-sm font-medium transition-all"
+                      class="image-option-button image-option-button--compact"
                       :class="currentImageConfig[field.key] === option.value ? 'bg-blue-500 text-white' : 'bg-muted/50 hover:bg-muted'"
                       @click="store.setImageModelConfig(store.selectedImageModel, field.key, option.value)"
                     >
@@ -1733,13 +1743,13 @@ onBeforeUnmount(() => {
 
                   <div
                     v-else
-                    class="grid grid-cols-4 gap-2"
+                    class="image-option-grid image-option-grid--plain"
                   >
                     <button
                       v-for="option in field.options"
                       :key="String(option.value)"
                       type="button"
-                      class="rounded-lg py-2.5 text-sm font-medium transition-all"
+                      class="image-option-button image-option-button--plain"
                       :class="currentImageConfig[field.key] === option.value ? 'bg-blue-500 text-white' : 'bg-muted/50 hover:bg-muted'"
                       @click="store.setImageModelConfig(store.selectedImageModel, field.key, option.value)"
                     >
@@ -2329,19 +2339,38 @@ onBeforeUnmount(() => {
                 class="w-full bg-black transition-opacity hover:opacity-90"
                 @loadedmetadata="setHistoryVideoDurationLabel(task, $event)"
               />
+              <template v-if="task.kind === 'video'">
+                <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <div class="flex h-11 w-11 items-center justify-center rounded-full bg-black/55 text-white shadow-sm">
+                    <Play class="ml-0.5 h-5 w-5 fill-current" />
+                  </div>
+                </div>
+                <div class="pointer-events-none absolute right-1.5 top-1.5 flex items-center gap-1 rounded bg-black/65 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                  <Video class="h-3 w-3" />
+                  视频
+                </div>
+              </template>
             </div>
 
             <div class="absolute bottom-1 left-1 flex flex-col items-start gap-1">
               <div class="flex flex-wrap gap-1">
                 <span
-                  v-if="task.kind === 'image' ? formatImageResolutionLabel(task) : formatVideoDurationLabel(task)"
+                  v-if="task.kind === 'image' && formatImageResolutionLabel(task)"
                   class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white"
                 >
-                  {{
-                    task.kind === 'image'
-                      ? formatImageResolutionLabel(task)
-                      : formatVideoDurationLabel(task)
-                  }}
+                  {{ formatImageResolutionLabel(task) }}
+                </span>
+                <span
+                  v-if="task.kind === 'video' && formatVideoResolutionLabel(task)"
+                  class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white"
+                >
+                  {{ formatVideoResolutionLabel(task) }}
+                </span>
+                <span
+                  v-if="task.kind === 'video' && formatVideoDurationLabel(task)"
+                  class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white"
+                >
+                  {{ formatVideoDurationLabel(task) }}
                 </span>
               </div>
               <div class="flex flex-wrap gap-1">
@@ -2421,6 +2450,7 @@ onBeforeUnmount(() => {
     <MediaModal
       :open="Boolean(previewImage)"
       :src="previewImage"
+      :kind="previewKind"
       :title="previewTitle"
       :show-continue="previewCanContinue"
       :show-download="previewKind !== 'prompt'"
@@ -2430,3 +2460,145 @@ onBeforeUnmount(() => {
     />
   </div>
 </template>
+
+<style scoped>
+.mode-switch {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.125rem;
+  width: 9.5rem;
+  border: 1px solid hsl(var(--input));
+  border-radius: calc(var(--radius) + 2px);
+  background: hsl(var(--background));
+  padding: 0.125rem;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+}
+
+.mode-switch-thumb {
+  position: absolute;
+  inset: 0.125rem auto 0.125rem 0.125rem;
+  width: calc(50% - 0.1875rem);
+  border-radius: calc(var(--radius) - 1px);
+  background: hsl(var(--primary));
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.14);
+  transform: translateX(0);
+  transition: transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.mode-switch[data-mode="video"] .mode-switch-thumb {
+  transform: translateX(calc(100% + 0.125rem));
+}
+
+.mode-switch-button {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: calc(var(--radius) - 1px);
+  padding: 0 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  transition:
+    color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.mode-switch-button:active {
+  transform: scale(0.98);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-switch-thumb,
+  .mode-switch-button {
+    transition: none;
+  }
+}
+
+.image-option-grid {
+  display: grid;
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.image-option-grid--preview {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.image-option-grid--compact {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.image-option-grid--plain {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.image-option-button {
+  min-width: 0;
+  border-radius: calc(var(--radius) - 2px);
+  font-weight: 500;
+  transition-property: color, background-color, border-color, text-decoration-color, fill, stroke;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+.image-option-button--preview {
+  display: flex;
+  min-height: 3.5rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 0.375rem;
+}
+
+.image-option-button--compact {
+  min-height: 2.5rem;
+  padding: 0.625rem 0.25rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.image-option-button--plain {
+  min-height: 2.5rem;
+  padding: 0.625rem 0.5rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.image-option-label {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
+  line-height: 1.05;
+}
+
+@media (min-width: 480px) {
+  .image-option-grid--preview {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .image-option-grid--compact {
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 768px) {
+  .image-option-grid--preview {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .image-option-grid--plain {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1180px) {
+  .image-option-grid--preview {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+</style>

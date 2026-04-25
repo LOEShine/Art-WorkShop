@@ -4,6 +4,7 @@ import { Download, Pencil, X } from "lucide-vue-next";
 defineProps<{
   open: boolean;
   src: string;
+  kind?: "image" | "video" | "prompt";
   title?: string;
   showContinue?: boolean;
   showDownload?: boolean;
@@ -23,7 +24,17 @@ const emit = defineEmits<{
     @click="emit('close')"
   >
     <div class="relative max-h-[90vh] max-w-[90vw]">
+      <video
+        v-if="kind === 'video'"
+        :src="src"
+        class="max-h-[90vh] max-w-[90vw] rounded-lg bg-black object-contain"
+        controls
+        playsinline
+        preload="metadata"
+        @click.stop
+      />
       <img
+        v-else
         :src="src"
         :alt="title || '预览'"
         class="max-h-[90vh] max-w-[90vw] rounded-lg object-contain"

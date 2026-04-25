@@ -819,21 +819,15 @@ export async function submitVideoTask({
     const body: Record<string, unknown> = {
       model: getResolvedVideoModelId(modelKey, config),
       content,
+      ratio: config.ratio,
+      duration: Number(config.duration),
+      resolution: config.resolution,
+      camerafixed: Boolean(config.camerafixed),
+      watermark: false,
+      generate_audio: Boolean(config.generateAudio),
+      draft: false,
+      return_last_frame: false,
     };
-
-    if (mode !== "first-last") {
-      body.ratio = config.ratio;
-      body.duration = Number(config.duration);
-      body.resolution = config.resolution;
-      body.framespersecond = Number(config.framespersecond);
-      if (String(config.seed || "").trim()) {
-        body.seed = Number(config.seed);
-      }
-      body.camerafixed = Boolean(config.camerafixed);
-      body.watermark = Boolean(config.watermark);
-      body.generate_audio = Boolean(config.generateAudio);
-      body.return_last_frame = Boolean(config.returnLastFrame);
-    }
 
     const response = await fetchJson<Record<string, unknown>>(
       buildApiUrl(apiBaseUrl, "/volc/v1/contents/generations/tasks"),

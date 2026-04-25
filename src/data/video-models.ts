@@ -170,7 +170,8 @@ export function createDefaultVideoConfigs(): VideoModelConfigs {
       seed: "",
       camerafixed: false,
       watermark: false,
-      generateAudio: false,
+      generateAudio: true,
+      draft: false,
       returnLastFrame: false,
       useFirstLastFrames: false,
       primaryImageSource: "",
@@ -282,6 +283,19 @@ export function getSoraDurationOptions(
   return resolveVideoMode("sora", config) === "image" ? ["10", "15"] : ["15", "25"];
 }
 
+export const SEEDANCE_RATIO_OPTIONS = ["adaptive", "16:9", "9:16", "4:3", "3:4", "1:1", "21:9"];
+
+export function getSeedanceDurationOptions(): string[] {
+  return Array.from({ length: 11 }, (_, index) => String(index + 2));
+}
+
+export function getHailuoDurationOptions(
+  config: VideoConfigRecord,
+): string[] {
+  const resolution = String(config.resolution || "").trim().toUpperCase();
+  return resolution === "1080P" ? ["6"] : ["6", "10"];
+}
+
 export function normalizeVideoConfig(
   modelKey: VideoModelId,
   config: VideoConfigRecord,
@@ -358,6 +372,49 @@ export function normalizeVideoConfig(
   }
 
   config.mode = resolveVideoMode(modelKey, config);
+
+  if (modelKey === "hailuo") {
+    const resolution = String(config.resolution || "").trim().toUpperCase();
+    config.resolution = resolution === "1080P" ? "1080P" : "768P";
+
+    const duration = String(config.duration || "").trim().replace(/s$/i, "");
+    const validDurations = getHailuoDurationOptions(config);
+    config.duration = validDurations.includes(duration)
+      ? duration
+      : config.resolution === "1080P"
+        ? "6"
+        : "10";
+
+    if (typeof config.promptOptimizer !== "boolean") {
+      config.promptOptimizer = true;
+    }
+  }
+
+  if (modelKey === "seedance") {
+    const ratio = String(config.ratio || "").trim();
+    config.ratio = SEEDANCE_RATIO_OPTIONS.includes(ratio) ? ratio : "adaptive";
+
+    const resolution = String(config.resolution || "").trim().toLowerCase();
+    config.resolution = ["480p", "720p", "1080p"].includes(resolution) ? resolution : "720p";
+
+    const duration = String(config.duration || "").trim().replace(/s$/i, "");
+    const validDurations = getSeedanceDurationOptions();
+    config.duration = validDurations.includes(duration) ? duration : "5";
+
+    config.framespersecond = "24";
+
+    config.seed = "";
+
+    if (typeof config.camerafixed !== "boolean") {
+      config.camerafixed = false;
+    }
+    config.watermark = false;
+    if (typeof config.generateAudio !== "boolean") {
+      config.generateAudio = true;
+    }
+    config.draft = false;
+    config.returnLastFrame = false;
+  }
 
   if (modelKey === "sora") {
     const validDurations = getSoraDurationOptions(config);

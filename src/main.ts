@@ -11,6 +11,7 @@ import "@fontsource/inter/700.css";
 import "@fontsource/caveat/600.css";
 import "@fontsource/caveat/700.css";
 import "@/styles/reference.css";
+import "@/styles/app.css";
 
 const app = createApp(App);
 const pinia = createPinia();
