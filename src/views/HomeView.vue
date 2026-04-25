@@ -1994,11 +1994,11 @@ onBeforeUnmount(() => {
                   class="space-y-3"
                 >
                   <div class="space-y-2">
-                    <div class="relative overflow-hidden rounded-md bg-muted">
+                    <div class="relative flex aspect-square items-center justify-center overflow-hidden rounded-md bg-muted">
                       <img
                         :src="activeResultImage"
                         :alt="`结果 ${activeResultImageIndex + 1}`"
-                        class="max-h-[420px] w-full cursor-pointer object-contain transition-opacity hover:opacity-90"
+                        class="h-full w-full cursor-pointer object-contain transition-opacity hover:opacity-90"
                         @click="openImageGallery(currentResultImages, activeResultImageIndex)"
                       />
                       <template v-if="currentResultImages.length > 1">

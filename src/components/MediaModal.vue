@@ -25,15 +25,15 @@ const emit = defineEmits<{
 <template>
   <div
     v-if="open"
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
+    class="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/80 p-3 sm:p-5"
     @click="emit('close')"
   >
-    <div class="relative flex max-h-[92vh] max-w-[92vw] flex-col items-center">
-      <div class="relative">
+    <div class="relative flex h-full max-h-[calc(100dvh-1.5rem)] w-full max-w-[calc(100vw-1.5rem)] flex-col items-center justify-center gap-3 sm:max-h-[calc(100dvh-2.5rem)] sm:max-w-[calc(100vw-2.5rem)]">
+      <div class="relative flex min-h-0 flex-1 items-center justify-center self-stretch">
         <video
           v-if="kind === 'video'"
           :src="src"
-          class="max-h-[90vh] max-w-[90vw] rounded-lg bg-black object-contain"
+          class="max-h-full max-w-full rounded-lg bg-black object-contain"
           controls
           playsinline
           preload="metadata"
@@ -43,7 +43,7 @@ const emit = defineEmits<{
           v-else
           :src="src"
           :alt="title || '预览'"
-          class="max-h-[82vh] max-w-[90vw] rounded-lg object-contain"
+          class="max-h-full max-w-full rounded-lg object-contain"
           @click.stop
         />
 
@@ -101,14 +101,14 @@ const emit = defineEmits<{
 
       <p
         v-if="title"
-        class="mt-3 text-center text-sm text-white/80"
+        class="shrink-0 text-center text-sm text-white/80"
       >
         {{ title }}
       </p>
 
       <div
         v-if="kind !== 'video' && items && items.length > 1"
-        class="mt-3 flex max-w-[90vw] gap-2 overflow-x-auto px-2 pb-1"
+        class="flex max-w-full shrink-0 gap-2 overflow-x-auto px-2 pb-1"
         @click.stop
       >
         <button
