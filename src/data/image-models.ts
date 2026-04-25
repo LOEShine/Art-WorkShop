@@ -2,6 +2,7 @@ import type { ImageModelConfigs, ImageModelDefinition, ImageModelId } from "@/ty
 
 export const IMAGE_UPLOAD_LIMITS: Record<ImageModelId, number> = {
   "gpt-image-1.5": 16,
+  "codex-image-2": 16,
   "gpt-image-1.5-official": 16,
   "gemini-3-pro-image-preview": 14,
 };
@@ -26,6 +27,35 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
           { value: "2048x1152", label: "2048×1152" },
           { value: "3840x2160", label: "3840×2160 4K" },
           { value: "2160x3840", label: "2160×3840 4K" },
+        ],
+      },
+      {
+        key: "n",
+        label: "生成张数",
+        default: 1,
+        compact: true,
+        options: Array.from({ length: 10 }, (_, index) => ({
+          value: index + 1,
+          label: String(index + 1),
+        })),
+      },
+    ],
+  },
+  {
+    id: "codex-image-2",
+    name: "Codex Image 2.0",
+    description: "Codex KEY 图像模型（gpt-image-2）",
+    options: [
+      {
+        key: "size",
+        label: "分辨率",
+        default: "default",
+        preview: true,
+        options: [
+          { value: "default", label: "默认" },
+          { value: "1024x1024", label: "1024×1024" },
+          { value: "1792x1024", label: "1792×1024" },
+          { value: "1024x1792", label: "1024×1792" },
         ],
       },
       {
@@ -123,4 +153,3 @@ export function createDefaultImageConfigs(): ImageModelConfigs {
     return configs;
   }, {} as ImageModelConfigs);
 }
-

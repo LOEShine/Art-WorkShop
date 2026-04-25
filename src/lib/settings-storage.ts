@@ -3,6 +3,7 @@ const SETTINGS_STORAGE_KEY = "art-workshop-settings-v1";
 export interface PersistedSettings {
   apiBaseUrl: string;
   apiKey: string;
+  codexApiKey: string;
 }
 
 export function readPersistedSettings(): Partial<PersistedSettings> {

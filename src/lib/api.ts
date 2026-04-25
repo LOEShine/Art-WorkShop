@@ -44,6 +44,10 @@ interface SubmitVeoVideoExtensionArgs {
 const PROMPT_OPTIMIZER_SYSTEM_PROMPT =
   "你是一个专业的AI图像生成提示词优化助手。你的任务是将用户提供的简单描述优化成详细、具体、适合AI图像生成的提示词。优化后的提示词应该：1) 包含具体的视觉细节（颜色、光线、构图等）2) 使用专业的摄影或艺术术语 3) 保持原意但更加生动和详细 4) 使用换行和逗号分隔不同的描述要素，让结构清晰 5) 关键的视觉元素用简短的短语表达 6) 直接返回优化后的提示词，不要有任何解释或前缀。";
 
+export const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
+export const CODEX_IMAGE_REMOTE_BASE_URL = "https://sgdr.funai.vip";
+export const CODEX_IMAGE_API_BASE_URL = "/codex-image-api";
+
 export function buildApiUrl(baseUrl: string, path: string): string {
   if (/^https?:\/\//i.test(path)) {
     return path;
@@ -409,6 +413,23 @@ function dataUrlToBlob(dataUrl: string): Blob {
   return new Blob([bytes], { type: mime });
 }
 
+function appendFormField(formData: FormData, key: string, value: unknown): void {
+  if (value === undefined || value === null || value === "") {
+    return;
+  }
+
+  formData.append(key, String(value));
+}
+
+function normalizeImageCount(value: unknown): number {
+  const count = Number(value || 1);
+  if (!Number.isFinite(count)) {
+    return 1;
+  }
+
+  return Math.min(Math.max(Math.floor(count), 1), 10);
+}
+
 function buildGeminiParts(prompt: string, sourceImages: string[]): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = [{ text: prompt }];
   for (const image of sourceImages) {
@@ -530,7 +551,7 @@ export async function generateImage(args: GenerateImageArgs): Promise<GenerateIm
   let body: Record<string, unknown> = { model, prompt };
 
   if (model === "gpt-image-1.5") {
-    const count = Number(config.n || 1);
+    const count = normalizeImageCount(config.n);
     const size = String(config.size || "auto");
     body = {
       model: "gpt-image-2",
@@ -540,6 +561,23 @@ export async function generateImage(args: GenerateImageArgs): Promise<GenerateIm
       n: count,
       background: "auto",
       moderation: "low",
+    };
+
+    if (sourceImages.length > 0) {
+      endpoint = buildApiUrl(apiBaseUrl, "/v1/images/edits");
+      body.images = sourceImages;
+    }
+  } else if (model === "codex-image-2") {
+    const size = String(config.size || "default");
+    const count = normalizeImageCount(config.n);
+    body = {
+      model: "gpt-image-2",
+      prompt,
+      quality: "high",
+      n: count,
+      background: "auto",
+      moderation: "low",
+      ...(size !== "default" ? { size } : {}),
     };
 
     if (sourceImages.length > 0) {
@@ -595,45 +633,61 @@ export async function generateImage(args: GenerateImageArgs): Promise<GenerateIm
     };
   }
 
-  let payload: Record<string, unknown>;
-  if (
-    (model === "gpt-image-1.5" || model === "gpt-image-1.5-official") &&
-    sourceImages.length > 0
-  ) {
-    const formData = new FormData();
-    formData.append("model", String(body.model || ""));
-    formData.append("prompt", String(body.prompt || ""));
-    formData.append("size", String(body.size || ""));
-    formData.append("quality", String(body.quality || ""));
-    formData.append("n", String(body.n || 1));
-    formData.append("background", String(body.background || "auto"));
-    formData.append("moderation", String(body.moderation || "auto"));
+  const requestImagePayload = async (requestBody: Record<string, unknown>) => {
+    if (
+      (model === "gpt-image-1.5" || model === "codex-image-2" || model === "gpt-image-1.5-official") &&
+      sourceImages.length > 0
+    ) {
+      const formData = new FormData();
+      appendFormField(formData, "model", requestBody.model);
+      appendFormField(formData, "prompt", requestBody.prompt);
+      appendFormField(formData, "size", requestBody.size);
+      appendFormField(formData, "quality", requestBody.quality);
+      appendFormField(formData, "n", requestBody.n || 1);
+      appendFormField(formData, "background", requestBody.background || "auto");
+      appendFormField(formData, "moderation", requestBody.moderation || "auto");
 
-    sourceImages.forEach((image, index) => {
-      formData.append("image", dataUrlToBlob(image), `image-${index + 1}.png`);
-    });
+      sourceImages.forEach((image, index) => {
+        formData.append("image", dataUrlToBlob(image), `image-${index + 1}.png`);
+      });
 
-    payload = await fetchJson<Record<string, unknown>>(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: formData,
-    });
-  } else {
-    payload = await fetchJson<Record<string, unknown>>(endpoint, {
+      return fetchJson<Record<string, unknown>>(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: formData,
+      });
+    }
+
+    return fetchJson<Record<string, unknown>>(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(requestBody),
     });
-  }
+  };
 
-  const images = extractGeneratedImages(payload, model);
+  const splitMultiImageRequest = model === "gpt-image-1.5" || model === "codex-image-2";
+  const requestedCount = splitMultiImageRequest ? normalizeImageCount(config.n) : 1;
+  const requestBodies = splitMultiImageRequest
+    ? Array.from({ length: requestedCount }, () => ({ ...body, n: 1 }))
+    : [body];
+  const payloadResults = await Promise.allSettled(
+    requestBodies.map((requestBody) => requestImagePayload(requestBody)),
+  );
+  const payloads = payloadResults.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : [],
+  );
+  const firstError = payloadResults.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  )?.reason;
+  const images = payloads.flatMap((payload) => extractGeneratedImages(payload, model));
   if (images.length === 0) {
-    throw new Error(extractErrorMessage(payload) || "未能获取生成的图片");
+    const errorMessage = payloads.map((payload) => extractErrorMessage(payload)).find(Boolean);
+    throw new Error(errorMessage || (firstError instanceof Error ? firstError.message : "") || "未能获取生成的图片");
   }
 
   return { images };

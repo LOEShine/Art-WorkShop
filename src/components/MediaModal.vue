@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Download, Pencil, X } from "lucide-vue-next";
+import { ChevronLeft, ChevronRight, Download, Pencil, X } from "lucide-vue-next";
 
 defineProps<{
   open: boolean;
@@ -8,12 +8,17 @@ defineProps<{
   title?: string;
   showContinue?: boolean;
   showDownload?: boolean;
+  items?: string[];
+  activeIndex?: number;
 }>();
 
 const emit = defineEmits<{
   close: [];
   continue: [];
   download: [];
+  previous: [];
+  next: [];
+  select: [index: number];
 }>();
 </script>
 
@@ -23,56 +28,75 @@ const emit = defineEmits<{
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/80"
     @click="emit('close')"
   >
-    <div class="relative max-h-[90vh] max-w-[90vw]">
-      <video
-        v-if="kind === 'video'"
-        :src="src"
-        class="max-h-[90vh] max-w-[90vw] rounded-lg bg-black object-contain"
-        controls
-        playsinline
-        preload="metadata"
-        @click.stop
-      />
-      <img
-        v-else
-        :src="src"
-        :alt="title || '预览'"
-        class="max-h-[90vh] max-w-[90vw] rounded-lg object-contain"
-        @click.stop
-      />
+    <div class="relative flex max-h-[92vh] max-w-[92vw] flex-col items-center">
+      <div class="relative">
+        <video
+          v-if="kind === 'video'"
+          :src="src"
+          class="max-h-[90vh] max-w-[90vw] rounded-lg bg-black object-contain"
+          controls
+          playsinline
+          preload="metadata"
+          @click.stop
+        />
+        <img
+          v-else
+          :src="src"
+          :alt="title || '预览'"
+          class="max-h-[82vh] max-w-[90vw] rounded-lg object-contain"
+          @click.stop
+        />
 
-      <div class="absolute right-2 top-2 flex gap-2">
-        <button
-          type="button"
-          class="inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
-          @click="emit('close')"
-        >
-          <X class="h-5 w-5" />
-        </button>
-      </div>
+        <template v-if="kind !== 'video' && items && items.length > 1">
+          <button
+            type="button"
+            class="absolute left-2 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+            @click.stop="emit('previous')"
+          >
+            <ChevronLeft class="h-5 w-5" />
+          </button>
+          <button
+            type="button"
+            class="absolute right-2 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+            @click.stop="emit('next')"
+          >
+            <ChevronRight class="h-5 w-5" />
+          </button>
+        </template>
 
-      <div
-        v-if="showContinue || showDownload || title"
-        class="absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-wrap items-center justify-center gap-2"
-      >
-        <button
-          v-if="showContinue"
-          type="button"
-          class="inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-          @click.stop="emit('continue')"
+        <div class="absolute right-2 top-2 flex gap-2">
+          <button
+            type="button"
+            class="inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+            @click.stop="emit('close')"
+          >
+            <X class="h-5 w-5" />
+          </button>
+        </div>
+
+        <div
+          v-if="showContinue || showDownload"
+          class="absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-wrap items-center justify-center gap-2"
         >
-          <Pencil class="h-4 w-4" />
-          继续修改
-        </button>
-        <button
-          v-if="showDownload"
-          type="button"
-          class="inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-          @click.stop="emit('download')"
-        >
-          <Download class="h-4 w-4" />
-          下载
-        </button>
+          <button
+            v-if="showContinue"
+            type="button"
+            class="inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+            @click.stop="emit('continue')"
+          >
+            <Pencil class="h-4 w-4" />
+            继续修改
+          </button>
+          <button
+            v-if="showDownload"
+            type="button"
+            class="inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+            @click.stop="emit('download')"
+          >
+            <Download class="h-4 w-4" />
+            下载
+          </button>
+        </div>
       </div>
 
       <p
@@ -81,6 +105,27 @@ const emit = defineEmits<{
       >
         {{ title }}
       </p>
+
+      <div
+        v-if="kind !== 'video' && items && items.length > 1"
+        class="mt-3 flex max-w-[90vw] gap-2 overflow-x-auto px-2 pb-1"
+        @click.stop
+      >
+        <button
+          v-for="(item, index) in items"
+          :key="`${item}-${index}`"
+          type="button"
+          class="h-14 w-14 shrink-0 overflow-hidden rounded-md border-2 transition-colors"
+          :class="index === activeIndex ? 'border-blue-300 opacity-100' : 'border-white/20 opacity-70 hover:opacity-100'"
+          @click="emit('select', index)"
+        >
+          <img
+            :src="item"
+            alt=""
+            class="h-full w-full object-cover"
+          />
+        </button>
+      </div>
     </div>
   </div>
 </template>

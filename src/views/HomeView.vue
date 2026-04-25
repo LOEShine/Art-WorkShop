@@ -4,6 +4,8 @@ import { useRouter } from "vue-router";
 import {
   BookOpen,
   Bot,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Copy,
   Cpu,
@@ -50,6 +52,7 @@ import {
   VIDEO_MODELS,
 } from "@/data/video-models";
 import {
+  CODEX_IMAGE_API_BASE_URL,
   createImageTask,
   generateImage,
   isErrorStatus,
@@ -101,6 +104,10 @@ const previewImage = ref("");
 const previewTitle = ref("");
 const previewKind = ref<"image" | "video" | "prompt">("image");
 const previewCanContinue = ref(false);
+const previewItems = ref<string[]>([]);
+const previewIndex = ref(0);
+const previewTitlePrefix = ref("");
+const activeResultImageIndex = ref(0);
 const currentImageElapsed = ref(0);
 const currentVideoElapsed = ref(0);
 const historyImageResolutionLabels = ref<Record<string, string>>({});
@@ -171,6 +178,12 @@ const currentVideoUploadLimit = computed(() =>
   getVideoUploadLimit(store.selectedVideoModel, currentVideoConfig.value),
 );
 const currentImageUploadLimit = computed(() => IMAGE_UPLOAD_LIMITS[store.selectedImageModel] ?? 1);
+const currentResultImages = computed(() =>
+  store.currentTask?.status === "success" ? store.currentTask.resultImages : [],
+);
+const activeResultImage = computed(
+  () => currentResultImages.value[activeResultImageIndex.value] || currentResultImages.value[0] || "",
+);
 const canGenerateImage = computed(() => store.prompt.trim().length > 0 && !store.isGenerating);
 const isVideoGenerating = computed(() => submittingVideo.value || store.videoTask?.phase === "pending");
 const videoSupportsFirstLastFrames = computed(() =>
@@ -526,8 +539,12 @@ function setHistoryVideoDurationLabel(task: GalleryHistoryItem, event: Event) {
   }
 }
 
-function formatImageResolutionLabel(task: ImageTask) {
-  const historyKey = `image-${task.id}`;
+function formatImageResolutionLabel(task: GalleryHistoryItem) {
+  if (task.kind !== "image") {
+    return "";
+  }
+
+  const historyKey = getGalleryHistoryKey(task);
   const actualResolution = historyImageResolutionLabels.value[historyKey];
   if (actualResolution) {
     return actualResolution;
@@ -546,6 +563,40 @@ function formatImageResolutionLabel(task: ImageTask) {
   }
 
   return "";
+}
+
+function getHistoryImagePreview(task: GalleryHistoryItem) {
+  return task.kind === "image" ? task.resultImages[0] || "" : "";
+}
+
+function getHistoryImageStackItems(task: GalleryHistoryItem) {
+  if (task.kind !== "image") {
+    return [];
+  }
+
+  return task.resultImages.slice(0, 5);
+}
+
+function getHistoryImageStackStyle(index: number) {
+  const offsets = [
+    { x: 0, y: 16, rotate: -1.5 },
+    { x: 9, y: 10, rotate: 2.5 },
+    { x: 18, y: 5, rotate: -3 },
+    { x: 27, y: 0, rotate: 4 },
+    { x: 37, y: 10, rotate: 8 },
+  ];
+  const item = offsets[index] || offsets[offsets.length - 1];
+
+  return {
+    transform: `translate(${item.x}px, ${item.y}px) rotate(${item.rotate}deg)`,
+    zIndex: String(index),
+  };
+}
+
+function getHistoryImageCountLabel(task: GalleryHistoryItem) {
+  return task.kind === "image" && task.resultImages.length > 1
+    ? `${task.resultImages.length}张`
+    : "";
 }
 
 function formatVideoDurationLabel(task: VideoTask) {
@@ -632,6 +683,19 @@ watch(
 );
 
 watch(
+  () => store.currentTask?.id,
+  () => {
+    activeResultImageIndex.value = 0;
+  },
+);
+
+watch(currentResultImages, (images) => {
+  if (activeResultImageIndex.value >= images.length) {
+    activeResultImageIndex.value = Math.max(images.length - 1, 0);
+  }
+});
+
+watch(
   () => [store.videoTask?.phase, store.videoTask?.createdAt] as const,
   ([phase, createdAt]) => {
     if (videoTimer) {
@@ -716,17 +780,106 @@ function openPromptLibrary() {
   router.push("/prompts");
 }
 
+function clampIndex(index: number, length: number) {
+  if (length <= 0) {
+    return 0;
+  }
+
+  return Math.min(Math.max(index, 0), length - 1);
+}
+
+function setActiveResultImage(index: number) {
+  activeResultImageIndex.value = clampIndex(index, currentResultImages.value.length);
+}
+
+function showPreviousResultImage() {
+  const length = currentResultImages.value.length;
+  if (length <= 1) {
+    return;
+  }
+
+  activeResultImageIndex.value = (activeResultImageIndex.value - 1 + length) % length;
+}
+
+function showNextResultImage() {
+  const length = currentResultImages.value.length;
+  if (length <= 1) {
+    return;
+  }
+
+  activeResultImageIndex.value = (activeResultImageIndex.value + 1) % length;
+}
+
 function openPreview(src: string, title = "", kind: "image" | "video" | "prompt" = "image", canContinue = false) {
   previewImage.value = src;
   previewTitle.value = title;
   previewKind.value = kind;
   previewCanContinue.value = canContinue;
+  previewItems.value = kind === "image" && src ? [src] : [];
+  previewIndex.value = 0;
+  previewTitlePrefix.value = title;
+}
+
+function setPreviewIndex(index: number) {
+  const items = previewItems.value;
+  if (items.length === 0) {
+    return;
+  }
+
+  const nextIndex = clampIndex(index, items.length);
+  previewIndex.value = nextIndex;
+  previewImage.value = items[nextIndex];
+  if (items.length > 1) {
+    previewTitle.value = `${previewTitlePrefix.value || "结果"} ${nextIndex + 1}/${items.length}`;
+  }
+}
+
+function showPreviousPreviewImage() {
+  const items = previewItems.value;
+  if (items.length <= 1) {
+    return;
+  }
+
+  setPreviewIndex((previewIndex.value - 1 + items.length) % items.length);
+}
+
+function showNextPreviewImage() {
+  const items = previewItems.value;
+  if (items.length <= 1) {
+    return;
+  }
+
+  setPreviewIndex((previewIndex.value + 1) % items.length);
+}
+
+function openImageGallery(images: string[], index = 0, titlePrefix = "结果") {
+  const items = images.filter(Boolean);
+  if (items.length === 0) {
+    return;
+  }
+
+  previewKind.value = "image";
+  previewCanContinue.value = true;
+  previewItems.value = items;
+  previewTitlePrefix.value = titlePrefix;
+  setPreviewIndex(index);
+}
+
+function openImageHistoryPreview(task: GalleryHistoryItem) {
+  if (task.kind !== "image") {
+    return;
+  }
+
+  openImageGallery(task.resultImages, 0);
 }
 
 function closePreview() {
   previewImage.value = "";
   previewTitle.value = "";
   previewCanContinue.value = false;
+  previewItems.value = [];
+  previewIndex.value = 0;
+  previewTitlePrefix.value = "";
 }
 
 function downloadImage(src: string, index = 0) {
@@ -738,6 +891,10 @@ function downloadImage(src: string, index = 0) {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+}
+
+function downloadImageSet(images: string[]) {
+  images.filter(Boolean).forEach((image, index) => downloadImage(image, index + 1));
 }
 
 function buildVideoFileName(task?: VideoTask | null) {
@@ -823,7 +980,7 @@ function getAspectPreviewSize(text: string) {
 
   if (!match) {
     const lower = normalized.toLowerCase();
-    if (normalized === "自动" || lower === "auto" || lower === "adaptive") {
+    if (normalized === "自动" || normalized === "默认" || lower === "auto" || lower === "adaptive" || lower === "default") {
       return { width: 12, height: 12 };
     }
     return null;
@@ -1215,13 +1372,14 @@ async function handleGenerateImage() {
   store.setIsGenerating(true);
 
   try {
+    const usesCodexImageKey = store.selectedImageModel === "codex-image-2";
     const result = await generateImage({
       model: store.selectedImageModel,
       prompt: store.prompt,
       sourceImages: [...store.uploadedImages],
       config: currentImageConfig.value,
-      apiBaseUrl: store.apiBaseUrl,
-      apiKey: store.apiKey,
+      apiBaseUrl: usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl,
+      apiKey: usesCodexImageKey ? store.codexApiKey : store.apiKey,
     });
 
     const finalTask: ImageTask = {
@@ -1431,7 +1589,7 @@ function handlePreviewDownload() {
   if (previewKind.value === "video") {
     downloadVideo(previewImage.value);
   } else {
-    downloadImage(previewImage.value, 0);
+    downloadImage(previewImage.value, previewIndex.value);
   }
 }
 
@@ -1835,34 +1993,71 @@ onBeforeUnmount(() => {
                   v-else-if="store.currentTask.status === 'success' && store.currentTask.resultImages.length > 0"
                   class="space-y-3"
                 >
-                  <div class="grid gap-2">
-                    <div
-                      v-for="(image, index) in store.currentTask.resultImages"
-                      :key="`${image}-${index}`"
-                      class="relative overflow-hidden rounded-md"
-                    >
+                  <div class="space-y-2">
+                    <div class="relative overflow-hidden rounded-md bg-muted">
                       <img
-                        :src="image"
-                        :alt="`结果 ${index + 1}`"
-                        class="w-full cursor-pointer transition-opacity hover:opacity-90"
-                        @click="openPreview(image, `结果 ${index + 1}`, 'image', true)"
+                        :src="activeResultImage"
+                        :alt="`结果 ${activeResultImageIndex + 1}`"
+                        class="max-h-[420px] w-full cursor-pointer object-contain transition-opacity hover:opacity-90"
+                        @click="openImageGallery(currentResultImages, activeResultImageIndex)"
                       />
+                      <template v-if="currentResultImages.length > 1">
+                        <button
+                          type="button"
+                          class="absolute left-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+                          @click.stop="showPreviousResultImage"
+                        >
+                          <ChevronLeft class="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          class="absolute right-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+                          @click.stop="showNextResultImage"
+                        >
+                          <ChevronRight class="h-4 w-4" />
+                        </button>
+                        <div class="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white">
+                          {{ activeResultImageIndex + 1 }}/{{ currentResultImages.length }}
+                        </div>
+                      </template>
                       <div class="absolute bottom-2 right-2 flex gap-1">
                         <button
                           type="button"
                           class="inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-                          @click.stop="store.continueWithResult(image)"
+                          title="继续编辑"
+                          @click.stop="store.continueWithResult(activeResultImage)"
                         >
                           <Pencil class="h-4 w-4" />
                         </button>
                         <button
                           type="button"
                           class="inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-                          @click.stop="downloadImage(image, index)"
+                          title="下载"
+                          @click.stop="downloadImage(activeResultImage, activeResultImageIndex)"
                         >
                           <Download class="h-4 w-4" />
                         </button>
                       </div>
+                    </div>
+
+                    <div
+                      v-if="currentResultImages.length > 1"
+                      class="flex gap-2 overflow-x-auto pb-1"
+                    >
+                      <button
+                        v-for="(image, index) in currentResultImages"
+                        :key="`${image}-${index}`"
+                        type="button"
+                        class="h-14 w-14 shrink-0 overflow-hidden rounded-md border transition-colors"
+                        :class="index === activeResultImageIndex ? 'border-primary' : 'border-border opacity-70 hover:opacity-100'"
+                        @click="setActiveResultImage(index)"
+                      >
+                        <img
+                          :src="image"
+                          :alt="`结果缩略图 ${index + 1}`"
+                          class="h-full w-full object-cover"
+                        />
+                      </button>
                     </div>
                   </div>
 
@@ -2316,20 +2511,67 @@ onBeforeUnmount(() => {
         <div class="columns-2 gap-3 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 2xl:columns-7">
           <article
             v-for="task in visibleHistory"
-            :key="`${task.kind}-${task.id}`"
-            class="group relative mb-4 break-inside-avoid overflow-hidden rounded-lg border bg-card transition-all hover:shadow-md"
+            :key="getGalleryHistoryKey(task)"
+            class="group relative mb-4 break-inside-avoid rounded-lg transition-all hover:shadow-md"
+            :class="task.kind === 'image' && task.resultImages.length > 1 ? 'overflow-visible' : 'overflow-hidden border bg-card'"
           >
             <div
               class="cursor-pointer"
-              @click="task.kind === 'image' ? openPreview(task.resultImages[0], '', 'image', true) : openPreview(task.videoUrl, '', 'video', false)"
+              @click="task.kind === 'image' ? openImageHistoryPreview(task) : openPreview(task.videoUrl, '', 'video', false)"
             >
-              <img
+              <div
                 v-if="task.kind === 'image'"
-                :src="task.resultImages[0]"
-                alt=""
-                class="w-full transition-opacity hover:opacity-90"
-                @load="setHistoryImageResolutionLabel(task, $event)"
-              />
+                class="history-stack"
+                :class="task.resultImages.length > 1 ? 'history-stack--multiple' : ''"
+              >
+                <div
+                  v-if="task.resultImages.length > 1"
+                  class="history-stack-stage"
+                >
+                  <img
+                    v-for="(image, index) in getHistoryImageStackItems(task)"
+                    :key="`${task.id}-${index}`"
+                    :src="image"
+                    :alt="`结果 ${index + 1}`"
+                    class="history-stack-image"
+                    :style="getHistoryImageStackStyle(index)"
+                    @load="index === 0 ? setHistoryImageResolutionLabel(task, $event) : undefined"
+                  />
+                  <div class="history-stack-actions">
+                    <button
+                      type="button"
+                      class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                      title="加载配置"
+                      @click.stop="loadGalleryItemConfig(task)"
+                    >
+                      <Copy class="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                      title="下载"
+                      @click.stop="downloadImageSet(task.resultImages)"
+                    >
+                      <Download class="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                      title="删除"
+                      @click.stop="removeGalleryItem(task)"
+                    >
+                      <Trash2 class="h-3 w-3" />
+                    </button>
+                  </div>
+                </div>
+                <img
+                  v-else
+                  :src="getHistoryImagePreview(task)"
+                  alt=""
+                  class="w-full transition-opacity hover:opacity-90"
+                  @load="setHistoryImageResolutionLabel(task, $event)"
+                />
+              </div>
               <video
                 v-else
                 :src="task.videoUrl"
@@ -2352,7 +2594,32 @@ onBeforeUnmount(() => {
               </template>
             </div>
 
-            <div class="absolute bottom-1 left-1 flex flex-col items-start gap-1">
+            <div
+              v-if="task.kind === 'image' && task.resultImages.length > 1"
+              class="pointer-events-none flex max-w-full flex-wrap items-start gap-1 px-1 pb-1 pt-0.5"
+            >
+              <span class="inline-flex items-center gap-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">
+                <ImageIcon class="h-3 w-3" />
+                {{ getHistoryImageCountLabel(task) }}
+              </span>
+              <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
+                {{ IMAGE_MODELS.find((model) => model.id === task.model)?.name || task.model }}
+              </span>
+              <span
+                v-if="formatImageResolutionLabel(task)"
+                class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white"
+              >
+                {{ formatImageResolutionLabel(task) }}
+              </span>
+              <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
+                {{ formatElapsed(task.generationTime) }}
+              </span>
+            </div>
+
+            <div
+              v-else
+              class="pointer-events-none absolute bottom-1 left-1 z-20 flex flex-col items-start gap-1"
+            >
               <div class="flex flex-wrap gap-1">
                 <span
                   v-if="task.kind === 'image' && formatImageResolutionLabel(task)"
@@ -2391,7 +2658,10 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div class="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+            <div
+              v-if="task.kind !== 'image' || task.resultImages.length <= 1"
+              class="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 opacity-0 transition-opacity group-hover:opacity-100"
+            >
               <button
                 type="button"
                 class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
@@ -2405,9 +2675,18 @@ onBeforeUnmount(() => {
                 type="button"
                 class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
                 title="继续编辑"
-                @click.stop="store.continueWithResult(task.resultImages[0])"
+                @click.stop="store.continueWithResult(getHistoryImagePreview(task))"
               >
                 <Pencil class="h-3 w-3" />
+              </button>
+              <button
+                v-if="task.kind === 'image'"
+                type="button"
+                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                title="下载"
+                @click.stop="downloadImage(getHistoryImagePreview(task), 0)"
+              >
+                <Download class="h-3 w-3" />
               </button>
               <button
                 v-if="task.kind === 'video' && shouldShowVeoExtendButton(task)"
@@ -2454,9 +2733,14 @@ onBeforeUnmount(() => {
       :title="previewTitle"
       :show-continue="previewCanContinue"
       :show-download="previewKind !== 'prompt'"
+      :items="previewItems"
+      :active-index="previewIndex"
       @close="closePreview"
       @continue="continueFromPreview"
       @download="handlePreviewDownload"
+      @previous="showPreviousPreviewImage"
+      @next="showNextPreviewImage"
+      @select="setPreviewIndex"
     />
   </div>
 </template>
@@ -2574,6 +2858,58 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
   text-align: center;
   line-height: 1.05;
+}
+
+.history-stack {
+  position: relative;
+  width: 100%;
+  overflow: visible;
+}
+
+.history-stack--multiple {
+  padding: 0.625rem 2.25rem 1.25rem 0.125rem;
+}
+
+.history-stack-stage {
+  position: relative;
+  z-index: 1;
+  aspect-ratio: 1 / 1;
+  min-height: 0;
+}
+
+.history-stack-image {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+  width: 100%;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  background: hsl(var(--card));
+  object-fit: cover;
+  box-shadow: 0 2px 4px rgb(0 0 0 / 0.24);
+  transform-origin: 50% 8%;
+  transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.history-stack-image:hover {
+  opacity: 0.9;
+}
+
+.history-stack-actions {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  opacity: 0;
+  transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.group:hover .history-stack-actions {
+  opacity: 1;
 }
 
 @media (min-width: 480px) {

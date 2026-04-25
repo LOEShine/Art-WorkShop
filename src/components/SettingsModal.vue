@@ -2,7 +2,12 @@
 import { ref, watch } from "vue";
 import { Check, Eye, EyeOff, Key, LoaderCircle, Server, TestTube, X } from "lucide-vue-next";
 
-import { buildApiUrl } from "@/lib/api";
+import {
+  buildApiUrl,
+  CODEX_IMAGE_API_BASE_URL,
+  CODEX_IMAGE_REMOTE_BASE_URL,
+  VECTOR_API_BASE_URL,
+} from "@/lib/api";
 import { useAppStore } from "@/stores/app";
 
 const props = defineProps<{
@@ -15,13 +20,16 @@ const emit = defineEmits<{
 
 const store = useAppStore();
 
-const apiBaseUrl = ref(store.apiBaseUrl);
 const apiKey = ref(store.apiKey);
+const codexApiKey = ref(store.codexApiKey);
 const showApiKey = ref(false);
-const isTesting = ref(false);
+const showCodexApiKey = ref(false);
+const testingTarget = ref<"api" | "codex" | null>(null);
 const saved = ref(false);
-const testStatus = ref<"success" | "error" | null>(null);
-const testMessage = ref("");
+const apiTestStatus = ref<"success" | "error" | null>(null);
+const apiTestMessage = ref("");
+const codexTestStatus = ref<"success" | "error" | null>(null);
+const codexTestMessage = ref("");
 
 watch(
   () => props.open,
@@ -30,35 +38,49 @@ watch(
       return;
     }
 
-    apiBaseUrl.value = store.apiBaseUrl;
     apiKey.value = store.apiKey;
+    codexApiKey.value = store.codexApiKey;
     showApiKey.value = false;
+    showCodexApiKey.value = false;
     saved.value = false;
-    testStatus.value = null;
-    testMessage.value = "";
+    testingTarget.value = null;
+    apiTestStatus.value = null;
+    apiTestMessage.value = "";
+    codexTestStatus.value = null;
+    codexTestMessage.value = "";
   },
 );
 
 function handleSave() {
-  store.setApiSettings(apiBaseUrl.value, apiKey.value);
+  store.setApiSettings(apiKey.value, codexApiKey.value);
   saved.value = true;
-  testStatus.value = null;
-  testMessage.value = "";
+  apiTestStatus.value = null;
+  apiTestMessage.value = "";
+  codexTestStatus.value = null;
+  codexTestMessage.value = "";
   window.setTimeout(() => {
     saved.value = false;
   }, 2000);
 }
 
-async function handleTest() {
-  isTesting.value = true;
-  testStatus.value = null;
-  testMessage.value = "";
+async function testKey(kind: "api" | "codex") {
+  const baseUrl = kind === "api" ? VECTOR_API_BASE_URL : CODEX_IMAGE_API_BASE_URL;
+  const key = kind === "api" ? apiKey.value.trim() : codexApiKey.value.trim();
+
+  testingTarget.value = kind;
+  if (kind === "api") {
+    apiTestStatus.value = null;
+    apiTestMessage.value = "";
+  } else {
+    codexTestStatus.value = null;
+    codexTestMessage.value = "";
+  }
 
   try {
-    const response = await fetch(buildApiUrl(apiBaseUrl.value, "/v1/models"), {
+    const response = await fetch(buildApiUrl(baseUrl, "/v1/models"), {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${apiKey.value.trim()}`,
+        Authorization: `Bearer ${key}`,
       },
     });
 
@@ -66,13 +88,24 @@ async function handleTest() {
       throw new Error(`HTTP ${response.status}`);
     }
 
-    testStatus.value = "success";
-    testMessage.value = "连接成功！API 可用";
+    if (kind === "api") {
+      apiTestStatus.value = "success";
+      apiTestMessage.value = "API KEY 可用";
+    } else {
+      codexTestStatus.value = "success";
+      codexTestMessage.value = "CODEX KEY 可用";
+    }
   } catch (error) {
-    testStatus.value = "error";
-    testMessage.value = `连接失败: ${error instanceof Error ? error.message : "网络错误"}`;
+    const message = `连接失败: ${error instanceof Error ? error.message : "网络错误"}`;
+    if (kind === "api") {
+      apiTestStatus.value = "error";
+      apiTestMessage.value = message;
+    } else {
+      codexTestStatus.value = "error";
+      codexTestMessage.value = message;
+    }
   } finally {
-    isTesting.value = false;
+    testingTarget.value = null;
   }
 }
 </script>
@@ -102,21 +135,8 @@ async function handleTest() {
       <div class="space-y-4">
         <div class="space-y-2">
           <label class="flex items-center gap-2 text-sm font-medium">
-            <Server class="h-4 w-4" />
-            API 地址
-          </label>
-          <input
-            v-model="apiBaseUrl"
-            type="text"
-            class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            placeholder="https://api.example.com"
-          />
-        </div>
-
-        <div class="space-y-2">
-          <label class="flex items-center gap-2 text-sm font-medium">
             <Key class="h-4 w-4" />
-            API Key
+            API KEY
           </label>
           <div class="relative">
             <input
@@ -140,6 +160,43 @@ async function handleTest() {
               />
             </button>
           </div>
+          <p class="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Server class="h-3.5 w-3.5" />
+            {{ VECTOR_API_BASE_URL }}
+          </p>
+        </div>
+
+        <div class="space-y-2">
+          <label class="flex items-center gap-2 text-sm font-medium">
+            <Key class="h-4 w-4" />
+            CODEX KEY
+          </label>
+          <div class="relative">
+            <input
+              v-model="codexApiKey"
+              :type="showCodexApiKey ? 'text' : 'password'"
+              class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 pr-10 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              placeholder="sk-..."
+            />
+            <button
+              type="button"
+              class="absolute right-0 top-0 inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent"
+              @click="showCodexApiKey = !showCodexApiKey"
+            >
+              <EyeOff
+                v-if="showCodexApiKey"
+                class="h-4 w-4"
+              />
+              <Eye
+                v-else
+                class="h-4 w-4"
+              />
+            </button>
+          </div>
+          <p class="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Server class="h-3.5 w-3.5" />
+            {{ CODEX_IMAGE_REMOTE_BASE_URL }}
+          </p>
         </div>
 
         <div class="space-y-2 pt-2">
@@ -155,18 +212,35 @@ async function handleTest() {
           <button
             type="button"
             class="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-input bg-background px-4 py-2 text-sm font-medium shadow-sm transition-colors hover:bg-accent"
-            :disabled="isTesting"
-            @click="handleTest"
+            :disabled="Boolean(testingTarget)"
+            @click="testKey('api')"
           >
             <LoaderCircle
-              v-if="isTesting"
+              v-if="testingTarget === 'api'"
               class="h-4 w-4 animate-spin"
             />
             <TestTube
               v-else
               class="h-4 w-4"
             />
-            {{ isTesting ? "测试中..." : "测试连接" }}
+            {{ testingTarget === 'api' ? "测试中..." : "测试 API KEY" }}
+          </button>
+
+          <button
+            type="button"
+            class="inline-flex h-9 w-full items-center justify-center gap-2 rounded-md border border-input bg-background px-4 py-2 text-sm font-medium shadow-sm transition-colors hover:bg-accent"
+            :disabled="Boolean(testingTarget)"
+            @click="testKey('codex')"
+          >
+            <LoaderCircle
+              v-if="testingTarget === 'codex'"
+              class="h-4 w-4 animate-spin"
+            />
+            <TestTube
+              v-else
+              class="h-4 w-4"
+            />
+            {{ testingTarget === 'codex' ? "测试中..." : "测试 CODEX KEY" }}
           </button>
 
           <div
@@ -178,27 +252,43 @@ async function handleTest() {
           </div>
 
           <div
-            v-if="testStatus"
+            v-if="apiTestStatus"
             class="flex items-center rounded-md p-2 text-sm"
-            :class="testStatus === 'success' ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'"
+            :class="apiTestStatus === 'success' ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'"
           >
             <Check
-              v-if="testStatus === 'success'"
+              v-if="apiTestStatus === 'success'"
               class="mr-2 h-4 w-4"
             />
             <X
               v-else
               class="mr-2 h-4 w-4"
             />
-            {{ testMessage }}
+            {{ apiTestMessage }}
+          </div>
+
+          <div
+            v-if="codexTestStatus"
+            class="flex items-center rounded-md p-2 text-sm"
+            :class="codexTestStatus === 'success' ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'"
+          >
+            <Check
+              v-if="codexTestStatus === 'success'"
+              class="mr-2 h-4 w-4"
+            />
+            <X
+              v-else
+              class="mr-2 h-4 w-4"
+            />
+            {{ codexTestMessage }}
           </div>
         </div>
 
         <div class="border-t pt-4 text-xs text-muted-foreground">
           <p><strong>当前配置:</strong></p>
-          <p>• 图片端点: POST /v1/images/generations</p>
-          <p>• 视频端点: VectorEngine 统一代理接口</p>
-          <p>• 支持模型: GPT Image, Gemini 3 Pro, Veo 3, Hailuo, Seedance, Sora</p>
+          <p>• API KEY: VectorEngine 图片/视频统一接口</p>
+          <p>• CODEX KEY: Codex Image 2.0 生图/图生图接口</p>
+          <p>• 支持模型: GPT Image, Codex Image, Gemini, Veo, Hailuo, Seedance, Sora</p>
         </div>
       </div>
     </div>

@@ -2,6 +2,7 @@ export type GenerationMode = "image" | "video";
 
 export type ImageModelId =
   | "gpt-image-1.5"
+  | "codex-image-2"
   | "gpt-image-1.5-official"
   | "gemini-3-pro-image-preview";
 

@@ -14,6 +14,7 @@ import {
   saveVideoHistoryTask,
   deleteVideoHistoryTask,
 } from "@/lib/history-db";
+import { VECTOR_API_BASE_URL } from "@/lib/api";
 import {
   readPersistedSettings,
   writePersistedSettings,
@@ -36,6 +37,7 @@ const HISTORY_LIMIT = 20;
 interface PersistedState {
   apiBaseUrl: string;
   apiKey: string;
+  codexApiKey: string;
   generationMode: GenerationMode;
   selectedImageModel: ImageModelId;
   imageModelConfigs: ReturnType<typeof createDefaultImageConfigs>;
@@ -47,8 +49,9 @@ function buildPersistedState(): PersistedState {
   const imageModelConfigs = createDefaultImageConfigs();
   const videoConfigs = createDefaultVideoConfigs();
   return {
-    apiBaseUrl: "https://api.vectorengine.ai",
+    apiBaseUrl: VECTOR_API_BASE_URL,
     apiKey: "",
+    codexApiKey: "",
     generationMode: "image",
     selectedImageModel: DEFAULT_IMAGE_MODEL_ID,
     imageModelConfigs,
@@ -61,6 +64,7 @@ function readPersistedState(): PersistedState {
   const defaults = {
     ...buildPersistedState(),
     ...readPersistedSettings(),
+    apiBaseUrl: VECTOR_API_BASE_URL,
   };
 
   try {
@@ -91,6 +95,8 @@ function readPersistedState(): PersistedState {
     return {
       ...defaults,
       ...parsed,
+      apiBaseUrl: VECTOR_API_BASE_URL,
+      codexApiKey: parsed.codexApiKey ?? defaults.codexApiKey ?? "",
       imageModelConfigs,
       videoConfigs,
     };
@@ -105,6 +111,7 @@ export const useAppStore = defineStore("artWorkshop", {
     return {
       apiBaseUrl: persisted.apiBaseUrl,
       apiKey: persisted.apiKey,
+      codexApiKey: persisted.codexApiKey,
       generationMode: persisted.generationMode,
       selectedImageModel: persisted.selectedImageModel,
       imageModelConfigs: persisted.imageModelConfigs,
@@ -139,6 +146,7 @@ export const useAppStore = defineStore("artWorkshop", {
       writePersistedSettings({
         apiBaseUrl: this.apiBaseUrl,
         apiKey: this.apiKey,
+        codexApiKey: this.codexApiKey,
       });
 
       const videoConfigs = {} as PersistedState["videoConfigs"];
@@ -159,6 +167,7 @@ export const useAppStore = defineStore("artWorkshop", {
       const payload: PersistedState = {
         apiBaseUrl: this.apiBaseUrl,
         apiKey: this.apiKey,
+        codexApiKey: this.codexApiKey,
         generationMode: this.generationMode,
         selectedImageModel: this.selectedImageModel,
         imageModelConfigs: this.imageModelConfigs,
@@ -168,12 +177,14 @@ export const useAppStore = defineStore("artWorkshop", {
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     },
-    setApiSettings(baseUrl: string, apiKey: string) {
-      this.apiBaseUrl = baseUrl.trim().replace(/\/+$/, "") || "https://api.vectorengine.ai";
+    setApiSettings(apiKey: string, codexApiKey: string) {
+      this.apiBaseUrl = VECTOR_API_BASE_URL;
       this.apiKey = apiKey.trim();
+      this.codexApiKey = codexApiKey.trim();
       writePersistedSettings({
         apiBaseUrl: this.apiBaseUrl,
         apiKey: this.apiKey,
+        codexApiKey: this.codexApiKey,
       });
       this.persist();
     },
