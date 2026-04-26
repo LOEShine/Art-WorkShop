@@ -44,11 +44,11 @@ onBeforeUnmount(() => {
     @click="emit('close')"
   >
     <div class="relative flex h-full max-h-[calc(100dvh-1.5rem)] w-full max-w-[calc(100vw-1.5rem)] flex-col items-center justify-center gap-3 sm:max-h-[calc(100dvh-2.5rem)] sm:max-w-[calc(100vw-2.5rem)]">
-      <div class="relative flex max-h-[80vh] max-w-[80vw] flex-none items-center justify-center">
+      <div class="media-modal__frame relative flex flex-none items-center justify-center">
         <video
           v-if="kind === 'video'"
           :src="src"
-          class="block max-h-[80vh] max-w-[80vw] rounded-lg bg-black object-contain"
+          class="media-modal__media rounded-lg bg-black"
           controls
           playsinline
           preload="metadata"
@@ -58,7 +58,7 @@ onBeforeUnmount(() => {
           v-else
           :src="src"
           :alt="title || '预览'"
-          class="block max-h-[80vh] max-w-[80vw] rounded-lg object-contain"
+          class="media-modal__media rounded-lg"
           @click.stop
         />
 
@@ -144,3 +144,19 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.media-modal__frame {
+  max-height: 80vh;
+  max-width: 80vw;
+}
+
+.media-modal__media {
+  display: block;
+  height: auto !important;
+  max-height: 80vh !important;
+  max-width: 80vw !important;
+  object-fit: contain;
+  width: auto !important;
+}
+</style>
