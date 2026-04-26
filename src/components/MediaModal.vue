@@ -29,11 +29,11 @@ const emit = defineEmits<{
     @click="emit('close')"
   >
     <div class="relative flex h-full max-h-[calc(100dvh-1.5rem)] w-full max-w-[calc(100vw-1.5rem)] flex-col items-center justify-center gap-3 sm:max-h-[calc(100dvh-2.5rem)] sm:max-w-[calc(100vw-2.5rem)]">
-      <div class="relative flex min-h-0 flex-1 items-center justify-center self-stretch">
+      <div class="relative flex min-h-0 max-h-[80dvh] max-w-[80vw] flex-1 items-center justify-center">
         <video
           v-if="kind === 'video'"
           :src="src"
-          class="max-h-full max-w-full rounded-lg bg-black object-contain"
+          class="max-h-[80dvh] max-w-[80vw] rounded-lg bg-black object-contain"
           controls
           playsinline
           preload="metadata"
@@ -43,7 +43,7 @@ const emit = defineEmits<{
           v-else
           :src="src"
           :alt="title || '预览'"
-          class="max-h-full max-w-full rounded-lg object-contain"
+          class="max-h-[80dvh] max-w-[80vw] rounded-lg object-contain"
           @click.stop
         />
 
