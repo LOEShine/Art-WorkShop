@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ChevronLeft, ChevronRight, Download, Pencil, X } from "lucide-vue-next";
+import { onBeforeUnmount, onMounted } from "vue";
 
-defineProps<{
+const props = defineProps<{
   open: boolean;
   src: string;
   kind?: "image" | "video" | "prompt";
@@ -20,6 +21,20 @@ const emit = defineEmits<{
   next: [];
   select: [index: number];
 }>();
+
+function handleKeyDown(event: KeyboardEvent) {
+  if (event.key === "Escape" && props.open) {
+    emit("close");
+  }
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", handleKeyDown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleKeyDown);
+});
 </script>
 
 <template>
@@ -29,11 +44,11 @@ const emit = defineEmits<{
     @click="emit('close')"
   >
     <div class="relative flex h-full max-h-[calc(100dvh-1.5rem)] w-full max-w-[calc(100vw-1.5rem)] flex-col items-center justify-center gap-3 sm:max-h-[calc(100dvh-2.5rem)] sm:max-w-[calc(100vw-2.5rem)]">
-      <div class="relative flex min-h-0 max-h-[80dvh] max-w-[80vw] flex-1 items-center justify-center">
+      <div class="relative flex max-h-[80vh] max-w-[80vw] flex-none items-center justify-center">
         <video
           v-if="kind === 'video'"
           :src="src"
-          class="max-h-[80dvh] max-w-[80vw] rounded-lg bg-black object-contain"
+          class="block max-h-[80vh] max-w-[80vw] rounded-lg bg-black object-contain"
           controls
           playsinline
           preload="metadata"
@@ -43,7 +58,7 @@ const emit = defineEmits<{
           v-else
           :src="src"
           :alt="title || '预览'"
-          class="max-h-[80dvh] max-w-[80vw] rounded-lg object-contain"
+          class="block max-h-[80vh] max-w-[80vw] rounded-lg object-contain"
           @click.stop
         />
 
