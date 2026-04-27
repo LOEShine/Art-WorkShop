@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
   BookOpen,
   Bot,
+  Camera,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -15,6 +16,8 @@ import {
   Pencil,
   Play,
   Plus,
+  RefreshCw,
+  Rotate3d,
   Settings,
   Sparkles,
   StepForward,
@@ -29,6 +32,7 @@ import {
 
 import OpenAiIcon from "@/components/icons/OpenAiIcon.vue";
 import MediaModal from "@/components/MediaModal.vue";
+import MultiAngleThreePreview from "@/components/MultiAngleThreePreview.vue";
 import SettingsModal from "@/components/SettingsModal.vue";
 import {
   createDefaultImageConfigs,
@@ -82,6 +86,26 @@ interface DynamicField {
   buttonWidthPx?: number;
 }
 
+interface CameraParameterSelection {
+  cameraType: string;
+  focalLength: string;
+  aperture: string;
+  filterStyle: string;
+}
+
+interface CameraParameterColumn {
+  key: keyof CameraParameterSelection;
+  title: string;
+  options: string[];
+}
+
+interface ViewRotationSettings {
+  target: "subject" | "camera";
+  rotation: number;
+  tilt: number;
+  zoom: number;
+}
+
 interface UploadPreviewItem {
   source: string;
   name: string;
@@ -96,6 +120,44 @@ const router = useRouter();
 const store = useAppStore();
 const defaultImageConfigs = createDefaultImageConfigs();
 const defaultVideoConfigs = createDefaultVideoConfigs();
+const CAMERA_PARAMETER_COLUMNS: CameraParameterColumn[] = [
+  {
+    key: "cameraType",
+    title: "相机类型",
+    options: ["富士系列", "哈苏系列", "徕卡系列", "ARRI 电影机", "RED 电影机", "索尼", "佳能", "尼康", "手机镜头", "无人机镜头模拟"],
+  },
+  {
+    key: "focalLength",
+    title: "焦距",
+    options: ["8mm", "16mm", "24mm", "35mm", "50mm", "85mm", "100mm", "125mm", "135mm", "200mm"],
+  },
+  {
+    key: "aperture",
+    title: "光圈",
+    options: ["f/8.0", "f/11", "f/16"],
+  },
+  {
+    key: "filterStyle",
+    title: "滤镜风格",
+    options: ["黑白风格", "复古风格", "电影颗粒风格", "高对比度风格", "低饱和风格", "夜景风格", "人像风格", "风光风格"],
+  },
+];
+const DEFAULT_CAMERA_PARAMETERS: CameraParameterSelection = {
+  cameraType: "富士系列",
+  focalLength: "8mm",
+  aperture: "f/8.0",
+  filterStyle: "黑白风格",
+};
+const DEFAULT_VIEW_ROTATION: ViewRotationSettings = {
+  target: "subject",
+  rotation: 0,
+  tilt: 0,
+  zoom: 5,
+};
+const VIEW_ROTATION_VERTICAL_MIN = -30;
+const VIEW_ROTATION_VERTICAL_MAX = 60;
+const VIEW_ROTATION_DISTANCE_MIN = 1;
+const VIEW_ROTATION_DISTANCE_MAX = 8;
 
 const imageInput = ref<HTMLInputElement | null>(null);
 const videoInput = ref<HTMLInputElement | null>(null);
@@ -116,6 +178,24 @@ const historyVideoDurationLabels = ref<Record<string, string>>({});
 const optimizingPrompt = ref(false);
 const submittingVideo = ref(false);
 const promptTextarea = ref<HTMLTextAreaElement | null>(null);
+const promptSystemRow = ref<HTMLElement | null>(null);
+const promptSystemInlineOffset = ref("0px");
+const cameraParametersEnabled = ref(false);
+const cameraParametersOpen = ref(false);
+const cameraSummaryOpen = ref(false);
+const cameraParameterReferenceEnabled = ref(false);
+const cameraParameterReferenceOpen = ref(false);
+const cameraParameterReferencePinned = ref(false);
+const cameraParameters = ref<CameraParameterSelection>({ ...DEFAULT_CAMERA_PARAMETERS });
+const cameraParameterDraft = ref<CameraParameterSelection>({ ...DEFAULT_CAMERA_PARAMETERS });
+const viewRotationEnabled = ref(false);
+const viewRotationOpen = ref(false);
+const viewRotationSummaryOpen = ref(false);
+const viewRotationReferenceEnabled = ref(false);
+const viewRotationReferenceOpen = ref(false);
+const viewRotationReferencePinned = ref(false);
+const viewRotation = ref<ViewRotationSettings>({ ...DEFAULT_VIEW_ROTATION });
+const viewRotationDraft = ref<ViewRotationSettings>({ ...DEFAULT_VIEW_ROTATION });
 const draggingImageIndex = ref<number | null>(null);
 const draggingVideoIndex = ref<number | null>(null);
 const videoUploadTargetIndex = ref<number | null>(null);
@@ -123,6 +203,9 @@ const videoUploadTargetIndex = ref<number | null>(null);
 let imageTimer: number | undefined;
 let videoTimer: number | undefined;
 let videoPollTimer: number | undefined;
+const cameraWheelScrollTimers: Partial<Record<keyof CameraParameterSelection, number>> = {};
+const cameraWheelAnimationFrames: Partial<Record<keyof CameraParameterSelection, number>> = {};
+const cameraWheelScrollTargets: Partial<Record<keyof CameraParameterSelection, number>> = {};
 
 function getImageModelIcon(modelId: string) {
   if (modelId === "gemini-3-pro-image-preview") {
@@ -184,7 +267,52 @@ const currentResultImages = computed(() =>
 const activeResultImage = computed(
   () => currentResultImages.value[activeResultImageIndex.value] || currentResultImages.value[0] || "",
 );
-const canGenerateImage = computed(() => store.prompt.trim().length > 0 && !store.isGenerating);
+const promptShimmerText = computed(() =>
+  optimizingPrompt.value
+    ? store.prompt.trim() || "正在生成随机提示词..."
+    : "",
+);
+const cameraParameterSummaryRows = computed(() =>
+  CAMERA_PARAMETER_COLUMNS.map((column) => ({
+    label: column.title,
+    value: cameraParameters.value[column.key],
+  })),
+);
+const cameraParameterPrompt = computed(() => {
+  if (!cameraParametersEnabled.value) {
+    return "";
+  }
+
+  const hasReference = cameraParameterReferenceEnabled.value && viewRotationReferenceImage.value;
+  const settingsText = `${cameraParameters.value.cameraType}，${cameraParameters.value.focalLength}焦距，${cameraParameters.value.aperture}光圈，${cameraParameters.value.filterStyle}滤镜`;
+  if (hasReference && !viewRotationReferenceEnabled.value) {
+    return `将参考图1的相机设定改为${settingsText}`;
+  }
+  return `相机设定：${settingsText}`;
+});
+const viewRotationReferenceImage = computed(() => store.uploadedImages[0] || "");
+const viewRotationDraftDescription = computed(() => getViewRotationDescription(viewRotationDraft.value));
+const hasPromptSystemTokens = computed(() => cameraParametersEnabled.value || viewRotationEnabled.value);
+const viewRotationSummaryRows = computed(() => [
+  { label: "视角", value: getViewRotationDescription(viewRotation.value) },
+  { label: "相机位置", value: getViewRotationCameraPositionDescription(viewRotation.value) },
+  {
+    label: "数值",
+    value: `水平 ${viewRotation.value.rotation}°，垂直 ${viewRotation.value.tilt}°，远近 ${getViewRotationZoomLabel(viewRotation.value.zoom)}`,
+  },
+]);
+const viewRotationPrompt = computed(() => {
+  if (!viewRotationEnabled.value) {
+    return "";
+  }
+
+  const promptDescription = getViewRotationPromptDescription(viewRotation.value);
+  if (viewRotationReferenceEnabled.value && viewRotationReferenceImage.value) {
+    return `将参考图1改变角度，将相机旋转到${promptDescription}`;
+  }
+  return `改变角度，将相机旋转到${promptDescription}`;
+});
+const canGenerateImage = computed(() => buildEffectiveImagePrompt().length > 0 && !store.isGenerating);
 const isVideoGenerating = computed(() => submittingVideo.value || store.videoTask?.phase === "pending");
 const videoSupportsFirstLastFrames = computed(() =>
   supportsFirstLastFrames(store.selectedVideoModel),
@@ -696,6 +824,28 @@ watch(currentResultImages, (images) => {
 });
 
 watch(
+  () => [
+    cameraParametersEnabled.value,
+    cameraParameterReferenceEnabled.value,
+    viewRotationEnabled.value,
+    viewRotationReferenceEnabled.value,
+    viewRotationReferenceImage.value,
+  ] as const,
+  () => {
+    if (!viewRotationReferenceImage.value) {
+      cameraParameterReferenceEnabled.value = false;
+      cameraParameterReferenceOpen.value = false;
+      cameraParameterReferencePinned.value = false;
+      viewRotationReferenceEnabled.value = false;
+      viewRotationReferenceOpen.value = false;
+      viewRotationReferencePinned.value = false;
+    }
+    updatePromptSystemInlineOffset();
+  },
+  { flush: "post" },
+);
+
+watch(
   () => [store.videoTask?.phase, store.videoTask?.createdAt] as const,
   ([phase, createdAt]) => {
     if (videoTimer) {
@@ -1017,12 +1167,560 @@ function ensureTextareaHeight() {
   }
 
   promptTextarea.value.style.height = "auto";
-  promptTextarea.value.style.height = `${Math.max(120, promptTextarea.value.scrollHeight)}px`;
+  promptTextarea.value.style.height = `${Math.max(96, promptTextarea.value.scrollHeight)}px`;
+}
+
+function updatePromptSystemInlineOffset() {
+  nextTick(() => {
+    const rowWidth = promptSystemRow.value?.getBoundingClientRect().width ?? 0;
+    promptSystemInlineOffset.value = rowWidth ? `${Math.ceil(rowWidth + 20)}px` : "0px";
+    window.requestAnimationFrame(ensureTextareaHeight);
+  });
 }
 
 function updatePrompt(prompt: string) {
   store.setPrompt(prompt);
   window.requestAnimationFrame(ensureTextareaHeight);
+}
+
+function handlePromptKeydown(event: KeyboardEvent) {
+  if (!hasPromptSystemTokens.value || (event.key !== "Backspace" && event.key !== "Delete")) {
+    return;
+  }
+
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  if (target.selectionStart === 0 && target.selectionEnd === 0) {
+    event.preventDefault();
+    if (viewRotationEnabled.value) {
+      removeViewRotation();
+      return;
+    }
+    removeCameraParameters();
+  }
+}
+
+function removeCameraParameters() {
+  if (cameraParameterReferenceEnabled.value) {
+    cameraParameterReferenceEnabled.value = false;
+    cameraParameterReferenceOpen.value = false;
+    cameraParameterReferencePinned.value = false;
+    updatePromptSystemInlineOffset();
+    return;
+  }
+
+  cameraParametersEnabled.value = false;
+  cameraSummaryOpen.value = false;
+  updatePromptSystemInlineOffset();
+}
+
+function removeViewRotation() {
+  if (viewRotationReferenceEnabled.value) {
+    viewRotationReferenceEnabled.value = false;
+    viewRotationReferenceOpen.value = false;
+    viewRotationReferencePinned.value = false;
+    updatePromptSystemInlineOffset();
+    return;
+  }
+
+  viewRotationEnabled.value = false;
+  viewRotationSummaryOpen.value = false;
+  viewRotationReferenceOpen.value = false;
+  viewRotationReferencePinned.value = false;
+  updatePromptSystemInlineOffset();
+}
+
+function openViewRotationReferencePreview() {
+  if (!viewRotationReferenceImage.value) {
+    return;
+  }
+
+  openPreview(viewRotationReferenceImage.value, "参考图1");
+}
+
+function showViewRotationReferencePreview() {
+  viewRotationReferenceOpen.value = true;
+}
+
+function hideViewRotationReferencePreview() {
+  if (!viewRotationReferencePinned.value) {
+    viewRotationReferenceOpen.value = false;
+  }
+}
+
+function toggleViewRotationReferencePreview() {
+  if (viewRotationReferencePinned.value) {
+    viewRotationReferencePinned.value = false;
+    viewRotationReferenceOpen.value = false;
+    return;
+  }
+
+  viewRotationReferencePinned.value = true;
+  viewRotationReferenceOpen.value = true;
+}
+
+function showCameraParameterReferencePreview() {
+  cameraParameterReferenceOpen.value = true;
+}
+
+function hideCameraParameterReferencePreview() {
+  if (!cameraParameterReferencePinned.value) {
+    cameraParameterReferenceOpen.value = false;
+  }
+}
+
+function toggleCameraParameterReferencePreview() {
+  if (cameraParameterReferencePinned.value) {
+    cameraParameterReferencePinned.value = false;
+    cameraParameterReferenceOpen.value = false;
+    return;
+  }
+
+  cameraParameterReferencePinned.value = true;
+  cameraParameterReferenceOpen.value = true;
+}
+
+function getViewRotationTargetLabel(target: ViewRotationSettings["target"]) {
+  return target === "camera" ? "自由视角" : "标准控件";
+}
+
+function getViewRotationHorizontalLabel(rotation: number) {
+  const normalized = normalizeDegrees360(rotation);
+  const labels = [
+    "正面视角",
+    "右前方偏正面视角",
+    "右前侧四分之三视角",
+    "右前方偏侧面视角",
+    "右侧视角",
+    "右后方偏侧面视角",
+    "右后侧四分之三视角",
+    "右后方偏背面视角",
+    "背面视角",
+    "左后方偏背面视角",
+    "左后侧四分之三视角",
+    "左后方偏侧面视角",
+    "左侧视角",
+    "左前方偏侧面视角",
+    "左前侧四分之三视角",
+    "左前方偏正面视角",
+  ];
+  return labels[Math.floor((normalized + 11.25) / 22.5) % labels.length];
+}
+
+function getViewRotationPromptHorizontalLabel(rotation: number) {
+  const normalized = normalizeDegrees360(rotation);
+  const labels = [
+    "正面视图",
+    "右前方偏正面的视图",
+    "右前方四分之三视图",
+    "右前方偏侧面的视图",
+    "从主体正右侧拍摄的侧面视图",
+    "右后方偏侧面的视图",
+    "右后方四分之三视图",
+    "右后方偏背面的视图",
+    "背面视图",
+    "左后方偏背面的视图",
+    "左后方四分之三视图",
+    "左后方偏侧面的视图",
+    "从主体正左侧拍摄的侧面视图",
+    "左前方偏侧面的视图",
+    "左前方四分之三视图",
+    "左前方偏正面的视图",
+  ];
+  return labels[Math.floor((normalized + 11.25) / 22.5) % labels.length];
+}
+
+function getViewRotationVerticalLabel(tilt: number) {
+  if (tilt < -22) {
+    return "极低机位仰视";
+  }
+  if (tilt < -8) {
+    return "低机位仰视";
+  }
+  if (tilt < 8) {
+    return "平视机位";
+  }
+  if (tilt < 22) {
+    return "轻微俯视";
+  }
+  if (tilt < 38) {
+    return "高机位俯视";
+  }
+  if (tilt < 52) {
+    return "强俯视";
+  }
+  return "接近顶视";
+}
+
+function getViewRotationZoomLabel(zoom: number) {
+  return zoom.toFixed(1);
+}
+
+function getViewRotationShotLabel(zoom: number) {
+  if (zoom < 1.8) {
+    return "超远景";
+  }
+  if (zoom < 3.2) {
+    return "远景";
+  }
+  if (zoom < 5.2) {
+    return "中景";
+  }
+  if (zoom < 6.8) {
+    return "近景";
+  }
+  return "特写";
+}
+
+function getViewRotationHorizontalPositionLabel(rotation: number) {
+  const normalized = normalizeDegrees360(rotation);
+  const labels = [
+    "正前方",
+    "右前方偏正面",
+    "右前方",
+    "右前方偏侧面",
+    "正右方",
+    "右后方偏侧面",
+    "右后方",
+    "右后方偏背面",
+    "正后方",
+    "左后方偏背面",
+    "左后方",
+    "左后方偏侧面",
+    "正左方",
+    "左前方偏侧面",
+    "左前方",
+    "左前方偏正面",
+  ];
+  return labels[Math.floor((normalized + 11.25) / 22.5) % labels.length];
+}
+
+function getViewRotationHeightPositionLabel(tilt: number) {
+  if (tilt < -22) {
+    return "极低处";
+  }
+  if (tilt < -8) {
+    return "低处";
+  }
+  if (tilt < 8) {
+    return "平视高度";
+  }
+  if (tilt < 22) {
+    return "略高处";
+  }
+  if (tilt < 38) {
+    return "高处";
+  }
+  if (tilt < 52) {
+    return "很高处";
+  }
+  return "接近正上方";
+}
+
+function getViewRotationDistancePositionLabel(zoom: number) {
+  if (zoom < 1.8) {
+    return "很远距离";
+  }
+  if (zoom < 3.2) {
+    return "远距离";
+  }
+  if (zoom < 5.2) {
+    return "中等距离";
+  }
+  if (zoom < 6.8) {
+    return "近距离";
+  }
+  return "贴近主体";
+}
+
+function getViewRotationCameraPositionDescription(settings: ViewRotationSettings) {
+  return `相机位于主体${getViewRotationHorizontalPositionLabel(settings.rotation)}、${getViewRotationHeightPositionLabel(settings.tilt)}、${getViewRotationDistancePositionLabel(settings.zoom)}，镜头朝向主体中心`;
+}
+
+function getViewRotationDescription(settings: ViewRotationSettings) {
+  return [
+    getViewRotationHorizontalLabel(settings.rotation),
+    getViewRotationVerticalLabel(settings.tilt),
+    getViewRotationShotLabel(settings.zoom),
+  ].join("，");
+}
+
+function getViewRotationPromptDescription(settings: ViewRotationSettings) {
+  return [
+    getViewRotationPromptHorizontalLabel(settings.rotation),
+    getViewRotationVerticalLabel(settings.tilt),
+    getViewRotationShotLabel(settings.zoom),
+  ].join("，");
+}
+
+function normalizeDegrees360(degrees: number) {
+  let normalized = degrees;
+  while (normalized >= 360) {
+    normalized -= 360;
+  }
+  while (normalized < 0) {
+    normalized += 360;
+  }
+  return normalized;
+}
+
+function buildEffectiveImagePrompt() {
+  const prompt = store.prompt.trim();
+  const cameraPrompt = cameraParameterPrompt.value;
+  const rotationPrompt = viewRotationPrompt.value;
+  return [rotationPrompt, cameraPrompt, prompt].filter(Boolean).join("\n");
+}
+
+function hasBoundReferenceImage() {
+  if (!viewRotationReferenceImage.value) {
+    return false;
+  }
+
+  return (
+    (cameraParametersEnabled.value && cameraParameterReferenceEnabled.value) ||
+    (viewRotationEnabled.value && viewRotationReferenceEnabled.value)
+  );
+}
+
+function buildEffectiveSourceImages() {
+  if (!store.uploadedImages.length) {
+    return [];
+  }
+
+  if (hasBoundReferenceImage()) {
+    return [store.uploadedImages[0]];
+  }
+
+  return [...store.uploadedImages];
+}
+
+function openCameraParameters() {
+  cameraParameterDraft.value = { ...cameraParameters.value };
+  cameraParametersOpen.value = true;
+  cameraSummaryOpen.value = false;
+  nextTick(() => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(scrollCameraParameterWheels);
+    });
+  });
+}
+
+function closeCameraParameters() {
+  cameraParametersOpen.value = false;
+}
+
+function confirmCameraParameters() {
+  cameraParameters.value = { ...cameraParameterDraft.value };
+  cameraParametersEnabled.value = true;
+  cameraParameterReferenceEnabled.value = Boolean(viewRotationReferenceImage.value);
+  cameraParametersOpen.value = false;
+  cameraSummaryOpen.value = false;
+  cameraParameterReferenceOpen.value = false;
+  cameraParameterReferencePinned.value = false;
+  updatePromptSystemInlineOffset();
+}
+
+function openViewRotation() {
+  viewRotationDraft.value = { ...viewRotation.value };
+  viewRotationOpen.value = true;
+}
+
+function closeViewRotation() {
+  viewRotationOpen.value = false;
+}
+
+function confirmViewRotation() {
+  viewRotation.value = { ...viewRotationDraft.value };
+  viewRotationEnabled.value = true;
+  viewRotationReferenceEnabled.value = Boolean(viewRotationReferenceImage.value);
+  viewRotationOpen.value = false;
+  viewRotationSummaryOpen.value = false;
+  viewRotationReferenceOpen.value = false;
+  viewRotationReferencePinned.value = false;
+  updatePromptSystemInlineOffset();
+}
+
+function resetViewRotation() {
+  viewRotationDraft.value = {
+    ...DEFAULT_VIEW_ROTATION,
+    target: viewRotationDraft.value.target,
+  };
+}
+
+function scrollCameraParameterWheels() {
+  for (const column of CAMERA_PARAMETER_COLUMNS) {
+    const wheel = document.querySelector<HTMLElement>(`[data-camera-wheel-scroll-key="${column.key}"]`);
+    const active = wheel?.querySelector<HTMLElement>("[data-camera-option-active='true']");
+    if (!wheel || !active) {
+      continue;
+    }
+
+    snapCameraWheelToOption(wheel, active, false, column.key);
+  }
+}
+
+function selectCameraParameter(key: keyof CameraParameterSelection, value: string, event?: Event) {
+  cameraParameterDraft.value = {
+    ...cameraParameterDraft.value,
+    [key]: value,
+  };
+
+  const target = event?.currentTarget;
+  if (target instanceof HTMLElement) {
+    const wheel = target.closest<HTMLElement>("[data-camera-wheel-scroll-key]");
+    if (wheel) {
+      snapCameraWheelToOption(wheel, target, true, key);
+    }
+  }
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function getCameraWheelMaxScroll(wheel: HTMLElement) {
+  return Math.max(0, wheel.scrollHeight - wheel.clientHeight);
+}
+
+function getCameraWheelOptionHeight(wheel: HTMLElement) {
+  return wheel.querySelector<HTMLElement>("[data-camera-option-value]")?.clientHeight || 36;
+}
+
+function getClosestCameraWheelOption(wheel: HTMLElement) {
+  const wheelCenter = wheel.scrollTop + wheel.clientHeight / 2;
+  const options = Array.from(wheel.querySelectorAll<HTMLElement>("[data-camera-option-value]"));
+  return options.reduce<HTMLElement | null>((current, option) => {
+    const optionCenter = option.offsetTop + option.clientHeight / 2;
+    if (!current) {
+      return option;
+    }
+
+    const currentCenter = current.offsetTop + current.clientHeight / 2;
+    return Math.abs(optionCenter - wheelCenter) < Math.abs(currentCenter - wheelCenter) ? option : current;
+  }, null);
+}
+
+function animateCameraWheelTo(
+  key: keyof CameraParameterSelection,
+  wheel: HTMLElement,
+  targetTop: number,
+  durationMs = 180,
+) {
+  const target = clampNumber(targetTop, 0, getCameraWheelMaxScroll(wheel));
+  const startTop = wheel.scrollTop;
+  const startTime = performance.now();
+
+  if (cameraWheelAnimationFrames[key]) {
+    window.cancelAnimationFrame(cameraWheelAnimationFrames[key]);
+  }
+
+  cameraWheelScrollTargets[key] = target;
+
+  const step = (now: number) => {
+    const progress = clampNumber((now - startTime) / durationMs, 0, 1);
+    const easedProgress = 1 - Math.pow(1 - progress, 3);
+    wheel.scrollTop = startTop + (target - startTop) * easedProgress;
+
+    if (progress < 1) {
+      cameraWheelAnimationFrames[key] = window.requestAnimationFrame(step);
+      return;
+    }
+
+    wheel.scrollTop = target;
+    delete cameraWheelAnimationFrames[key];
+  };
+
+  cameraWheelAnimationFrames[key] = window.requestAnimationFrame(step);
+}
+
+function snapCameraWheelToOption(
+  wheel: HTMLElement,
+  option: HTMLElement,
+  smooth = true,
+  key?: keyof CameraParameterSelection,
+) {
+  const targetTop = option.offsetTop - (wheel.clientHeight - option.clientHeight) / 2;
+  const target = clampNumber(targetTop, 0, getCameraWheelMaxScroll(wheel));
+
+  if (!smooth) {
+    const previousScrollBehavior = wheel.style.scrollBehavior;
+    if (key && cameraWheelAnimationFrames[key]) {
+      window.cancelAnimationFrame(cameraWheelAnimationFrames[key]);
+      delete cameraWheelAnimationFrames[key];
+    }
+    wheel.style.scrollBehavior = "auto";
+    wheel.scrollTop = target;
+    wheel.style.scrollBehavior = previousScrollBehavior;
+    if (key) {
+      cameraWheelScrollTargets[key] = target;
+    }
+    return;
+  }
+
+  if (key) {
+    animateCameraWheelTo(key, wheel, target);
+    return;
+  }
+
+  wheel.scrollTo({
+    top: target,
+    behavior: "smooth",
+  });
+}
+
+function scheduleCameraWheelSnap(column: CameraParameterColumn, wheel: HTMLElement, delayMs = 120) {
+  const existingTimer = cameraWheelScrollTimers[column.key];
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+  }
+
+  cameraWheelScrollTimers[column.key] = window.setTimeout(() => {
+    const closest = getClosestCameraWheelOption(wheel);
+    const value = closest?.dataset.cameraOptionValue;
+    if (value) {
+      cameraParameterDraft.value = {
+        ...cameraParameterDraft.value,
+        [column.key]: value,
+      };
+      if (closest) {
+        snapCameraWheelToOption(wheel, closest, true, column.key);
+      }
+    }
+  }, delayMs);
+}
+
+function handleCameraWheelScroll(column: CameraParameterColumn, event: Event) {
+  const wheel = event.currentTarget;
+  if (!(wheel instanceof HTMLElement)) {
+    return;
+  }
+
+  if (!cameraWheelAnimationFrames[column.key]) {
+    cameraWheelScrollTargets[column.key] = wheel.scrollTop;
+  }
+  scheduleCameraWheelSnap(column, wheel);
+}
+
+function handleCameraWheelWheel(column: CameraParameterColumn, event: WheelEvent) {
+  const wheel = event.currentTarget;
+  if (!(wheel instanceof HTMLElement)) {
+    return;
+  }
+
+  const direction = Math.sign(event.deltaY || event.deltaX);
+  if (!direction) {
+    return;
+  }
+
+  event.preventDefault();
+  const optionHeight = getCameraWheelOptionHeight(wheel);
+  const baseTop = cameraWheelScrollTargets[column.key] ?? wheel.scrollTop;
+  const targetTop = clampNumber(baseTop + direction * optionHeight, 0, getCameraWheelMaxScroll(wheel));
+  animateCameraWheelTo(column.key, wheel, targetTop, 170);
+  scheduleCameraWheelSnap(column, wheel, 220);
 }
 
 function pickImageFiles() {
@@ -1357,11 +2055,13 @@ async function handleGenerateImage() {
   }
 
   const startedAt = Date.now();
+  const imagePrompt = buildEffectiveImagePrompt();
+  const sourceImages = buildEffectiveSourceImages();
   const task = createImageTask({
     createdAt: startedAt,
     status: "generating",
-    sourceImages: [...store.uploadedImages],
-    prompt: store.prompt,
+    sourceImages,
+    prompt: imagePrompt,
     model: store.selectedImageModel,
     modelConfig: { ...currentImageConfig.value },
     resultImages: [],
@@ -1375,8 +2075,8 @@ async function handleGenerateImage() {
     const usesCodexImageKey = store.selectedImageModel === "codex-image-2";
     const result = await generateImage({
       model: store.selectedImageModel,
-      prompt: store.prompt,
-      sourceImages: [...store.uploadedImages],
+      prompt: imagePrompt,
+      sourceImages,
       config: currentImageConfig.value,
       apiBaseUrl: usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl,
       apiKey: usesCodexImageKey ? store.codexApiKey : store.apiKey,
@@ -1648,6 +2348,16 @@ onBeforeUnmount(() => {
   if (videoTimer) {
     window.clearInterval(videoTimer);
   }
+  for (const timer of Object.values(cameraWheelScrollTimers)) {
+    if (timer) {
+      window.clearTimeout(timer);
+    }
+  }
+  for (const frame of Object.values(cameraWheelAnimationFrames)) {
+    if (frame) {
+      window.cancelAnimationFrame(frame);
+    }
+  }
 });
 </script>
 
@@ -1813,10 +2523,10 @@ onBeforeUnmount(() => {
                       <img
                         :src="image"
                         :alt="`图片 ${index + 1}`"
-                        class="h-full w-full cursor-pointer object-cover"
+                        class="h-full w-full cursor-pointer bg-muted/40 object-contain"
                         @click="openPreview(image, `参考图 ${index + 1}`, 'image')"
                       />
-                      <span class="absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 text-[10px] text-white">
+                      <span class="absolute bottom-1 left-1 inline-flex h-4 w-4 items-center justify-center rounded bg-black/60 text-[10px] font-medium leading-none text-white">
                         {{ index + 1 }}
                       </span>
                       <button
@@ -1918,24 +2628,217 @@ onBeforeUnmount(() => {
 
                 <div class="flex-1 space-y-2">
                   <div class="text-xs text-muted-foreground">提示词</div>
-                  <div class="group relative">
-                    <textarea
-                      ref="promptTextarea"
-                      :value="store.prompt"
-                      placeholder="输入提示词，生成图片..."
-                      class="min-h-[120px] w-full resize-none overflow-hidden rounded-md border border-input bg-transparent px-3 py-2 pr-24 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      @input="updatePrompt(($event.target as HTMLTextAreaElement).value)"
-                    />
-                    <button
-                      type="button"
-                      class="absolute bottom-2 right-2 flex items-center gap-1.5 rounded-md border border-border/10 bg-background/20 px-2.5 py-1.5 text-xs opacity-50 transition-all backdrop-blur-sm group-hover:opacity-100 hover:bg-background/70 hover:border-border/40 group-focus-within:opacity-100"
-                      :class="optimizingPrompt ? 'bg-accent/60 opacity-100' : ''"
-                      :disabled="optimizingPrompt"
-                      @click="handleOptimizePrompt"
+                  <div class="rounded-md border border-input bg-transparent shadow-sm focus-within:ring-1 focus-within:ring-ring">
+                    <div
+                      class="relative"
+                      :style="{ '--prompt-system-offset': promptSystemInlineOffset }"
                     >
-                      <WandSparkles class="h-3.5 w-3.5" />
-                      <span>{{ optimizingPrompt ? "优化中" : store.prompt.trim() ? "提示词优化" : "随机生成" }}</span>
-                    </button>
+                      <div
+                        v-if="hasPromptSystemTokens"
+                        ref="promptSystemRow"
+                        class="prompt-system-indicator"
+                      >
+                        <div
+                          v-if="cameraParametersEnabled"
+                          class="prompt-system-chain"
+                        >
+                          <div
+                            class="prompt-system-token-wrap"
+                            @mouseenter="cameraSummaryOpen = true"
+                            @mouseleave="cameraSummaryOpen = false"
+                          >
+                            <div
+                              class="prompt-system-token-group prompt-system-token-group--linked"
+                              :class="cameraParameterReferenceEnabled && viewRotationReferenceImage ? 'prompt-system-token-group--has-reference' : ''"
+                            >
+                              <button
+                                type="button"
+                                class="prompt-system-token prompt-system-token--camera"
+                                @click.stop="cameraSummaryOpen = !cameraSummaryOpen"
+                              >
+                                <Camera class="h-3.5 w-3.5" />
+                                <span>相机参数</span>
+                              </button>
+                            </div>
+                            <div
+                              v-if="cameraSummaryOpen"
+                              class="prompt-system-popover"
+                              @click.stop
+                            >
+                              <div class="mb-1 text-[11px] font-semibold text-foreground">已应用到系统提示词</div>
+                              <div
+                                v-for="row in cameraParameterSummaryRows"
+                                :key="row.label"
+                                class="prompt-system-row"
+                              >
+                                <span class="text-muted-foreground">{{ row.label }}</span>
+                                <span class="font-medium text-foreground">{{ row.value }}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div
+                            v-if="cameraParameterReferenceEnabled && viewRotationReferenceImage"
+                            class="prompt-reference-token-wrap"
+                            @mouseenter="showCameraParameterReferencePreview"
+                            @mouseleave="hideCameraParameterReferencePreview"
+                          >
+                            <button
+                              type="button"
+                              class="prompt-reference-token prompt-reference-token--linked"
+                              @click.stop="toggleCameraParameterReferencePreview"
+                            >
+                              @参考图1
+                            </button>
+                            <div
+                              v-if="cameraParameterReferenceOpen"
+                              class="prompt-reference-popover"
+                              @click.stop
+                            >
+                              <button
+                                type="button"
+                                class="prompt-reference-preview"
+                                @click="openViewRotationReferencePreview"
+                              >
+                                <img
+                                  :src="viewRotationReferenceImage"
+                                  alt="参考图1缩略图"
+                                />
+                              </button>
+                              <div class="prompt-reference-caption">@参考图1</div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div
+                          v-if="viewRotationEnabled"
+                          class="prompt-system-chain"
+                        >
+                          <div
+                            class="prompt-system-token-wrap"
+                            @mouseenter="viewRotationSummaryOpen = true"
+                            @mouseleave="viewRotationSummaryOpen = false"
+                          >
+                            <div
+                              class="prompt-system-token-group prompt-system-token-group--linked"
+                              :class="viewRotationReferenceEnabled && viewRotationReferenceImage ? 'prompt-system-token-group--has-reference' : ''"
+                            >
+                              <button
+                                type="button"
+                                class="prompt-system-token prompt-system-token--view"
+                                @click.stop="viewRotationSummaryOpen = !viewRotationSummaryOpen"
+                              >
+                                <Rotate3d class="h-3.5 w-3.5" />
+                                <span>视角转动</span>
+                              </button>
+                            </div>
+                            <div
+                              v-if="viewRotationSummaryOpen"
+                              class="prompt-system-popover prompt-system-popover--wide"
+                              @click.stop
+                            >
+                              <div class="mb-1 text-[11px] font-semibold text-foreground">已应用到系统提示词</div>
+                              <div
+                                v-for="row in viewRotationSummaryRows"
+                                :key="row.label"
+                                class="prompt-system-row prompt-system-row--stack"
+                              >
+                                <span class="text-muted-foreground">{{ row.label }}</span>
+                                <span class="font-medium text-foreground">{{ row.value }}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div
+                            v-if="viewRotationReferenceEnabled && viewRotationReferenceImage"
+                            class="prompt-reference-token-wrap"
+                            @mouseenter="showViewRotationReferencePreview"
+                            @mouseleave="hideViewRotationReferencePreview"
+                          >
+                            <button
+                              type="button"
+                              class="prompt-reference-token prompt-reference-token--linked"
+                              @click.stop="toggleViewRotationReferencePreview"
+                            >
+                              @参考图1
+                            </button>
+                            <div
+                              v-if="viewRotationReferenceOpen"
+                              class="prompt-reference-popover"
+                              @click.stop
+                            >
+                              <button
+                                type="button"
+                                class="prompt-reference-preview"
+                                @click="openViewRotationReferencePreview"
+                              >
+                                <img
+                                  :src="viewRotationReferenceImage"
+                                  alt="参考图1缩略图"
+                                />
+                              </button>
+                              <div class="prompt-reference-caption">@参考图1</div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <textarea
+                        ref="promptTextarea"
+                        :value="store.prompt"
+                        :placeholder="hasPromptSystemTokens ? '' : '输入提示词，生成图片...'"
+                        class="block min-h-24 w-full resize-none overflow-hidden rounded-t-md border-0 bg-transparent px-3 py-2 text-sm shadow-none placeholder:text-muted-foreground focus-visible:outline-none"
+                        :class="[optimizingPrompt ? 'prompt-textarea--busy' : '', hasPromptSystemTokens ? 'prompt-textarea--with-system' : '']"
+                        @keydown="handlePromptKeydown"
+                        @input="updatePrompt(($event.target as HTMLTextAreaElement).value)"
+                      />
+                      <div
+                        v-if="optimizingPrompt"
+                        class="prompt-shimmer-layer pointer-events-none absolute inset-0 whitespace-pre-wrap break-words px-3 py-2 text-sm"
+                        :class="hasPromptSystemTokens ? 'prompt-shimmer-layer--with-system' : ''"
+                        aria-hidden="true"
+                      >
+                        <span
+                          v-for="(char, index) in promptShimmerText"
+                          :key="`${char}-${index}`"
+                          class="prompt-shimmer-char"
+                          :style="{ animationDelay: `${index * 28}ms` }"
+                        >{{ char }}</span>
+                      </div>
+                    </div>
+                    <div class="prompt-tools-row px-3 pb-3 pt-1">
+                      <div class="prompt-tools-group">
+                        <button
+                          type="button"
+                          class="prompt-tool-button"
+                          :class="optimizingPrompt ? 'prompt-tool-button--active' : ''"
+                          :disabled="optimizingPrompt"
+                          @click="handleOptimizePrompt"
+                        >
+                          <WandSparkles class="h-3.5 w-3.5" />
+                          <span>{{ optimizingPrompt ? "优化中" : store.prompt.trim() ? "提示词优化" : "随机提示词" }}</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="prompt-tool-button"
+                          :class="cameraParametersEnabled ? 'prompt-tool-button--selected' : ''"
+                          :aria-pressed="cameraParametersEnabled"
+                          @click="openCameraParameters"
+                        >
+                          <Camera class="h-3.5 w-3.5" />
+                          <span>相机参数</span>
+                        </button>
+                        <button
+                          type="button"
+                          class="prompt-tool-button"
+                          :class="viewRotationEnabled ? 'prompt-tool-button--selected' : ''"
+                          :aria-pressed="viewRotationEnabled"
+                          @click="openViewRotation"
+                        >
+                          <Rotate3d class="h-3.5 w-3.5" />
+                          <span>视角转动</span>
+                        </button>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -2726,6 +3629,182 @@ onBeforeUnmount(() => {
       @close="settingsOpen = false"
     />
 
+    <div
+      v-if="cameraParametersOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6"
+      @click="closeCameraParameters"
+    >
+      <div
+        class="camera-parameter-modal"
+        @click.stop
+      >
+        <div class="camera-parameter-header">
+          <h3 class="text-sm font-medium text-muted-foreground">相机参数</h3>
+          <button
+            type="button"
+            class="camera-parameter-close"
+            @click="closeCameraParameters"
+          >
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+        <div class="camera-parameter-columns">
+          <section
+            v-for="column in CAMERA_PARAMETER_COLUMNS"
+            :key="column.key"
+            class="camera-parameter-column"
+          >
+            <h4 class="camera-parameter-title">{{ column.title }}</h4>
+            <div class="camera-parameter-wheel">
+              <div class="camera-parameter-selection" />
+              <div
+                class="camera-parameter-list"
+                :data-camera-wheel-scroll-key="column.key"
+                @scroll="handleCameraWheelScroll(column, $event)"
+                @wheel="handleCameraWheelWheel(column, $event)"
+              >
+                <button
+                  v-for="option in column.options"
+                  :key="option"
+                  type="button"
+                  class="camera-parameter-option"
+                  :class="cameraParameterDraft[column.key] === option ? 'camera-parameter-option--active' : ''"
+                  :data-camera-option-value="option"
+                  :data-camera-option-active="cameraParameterDraft[column.key] === option"
+                  @click="selectCameraParameter(column.key, option, $event)"
+                >
+                  {{ option }}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+        <div class="camera-parameter-actions">
+          <button
+            type="button"
+            class="camera-parameter-secondary"
+            @click="closeCameraParameters"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="camera-parameter-primary"
+            @click="confirmCameraParameters"
+          >
+            确定
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div
+      v-if="viewRotationOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6"
+      @click="closeViewRotation"
+    >
+      <div
+        class="view-rotation-modal"
+        @click.stop
+      >
+        <div class="view-rotation-header">
+          <h3 class="text-sm font-semibold text-foreground">多角度</h3>
+          <button
+            type="button"
+            class="view-rotation-reset"
+            title="复位"
+            @click="resetViewRotation"
+          >
+            <RefreshCw class="h-4 w-4" />
+          </button>
+        </div>
+
+        <div class="view-rotation-tabs">
+          <button
+            type="button"
+            class="view-rotation-tab"
+            :class="viewRotationDraft.target === 'subject' ? 'view-rotation-tab--active' : ''"
+            @click="viewRotationDraft = { ...viewRotationDraft, target: 'subject' }"
+          >
+            标准控件
+          </button>
+          <button
+            type="button"
+            class="view-rotation-tab"
+            :class="viewRotationDraft.target === 'camera' ? 'view-rotation-tab--active' : ''"
+            @click="viewRotationDraft = { ...viewRotationDraft, target: 'camera' }"
+          >
+            自由视角
+          </button>
+        </div>
+
+        <div class="view-rotation-preview-wrap">
+          <input
+            class="view-rotation-readout"
+            :value="viewRotationDraftDescription"
+            readonly
+          />
+          <MultiAngleThreePreview
+            v-model="viewRotationDraft"
+            :image-url="viewRotationReferenceImage"
+          />
+        </div>
+
+        <div class="view-rotation-sliders">
+          <label class="view-rotation-slider">
+            <span>水平</span>
+            <input
+              v-model.number="viewRotationDraft.rotation"
+              type="range"
+              min="0"
+              max="359"
+              step="1"
+            />
+            <strong>{{ viewRotationDraft.rotation }}°</strong>
+          </label>
+          <label class="view-rotation-slider">
+            <span>垂直</span>
+            <input
+              v-model.number="viewRotationDraft.tilt"
+              type="range"
+              :min="VIEW_ROTATION_VERTICAL_MIN"
+              :max="VIEW_ROTATION_VERTICAL_MAX"
+              step="1"
+            />
+            <strong>{{ viewRotationDraft.tilt }}°</strong>
+          </label>
+          <label class="view-rotation-slider">
+            <span>远近</span>
+            <input
+              v-model.number="viewRotationDraft.zoom"
+              type="range"
+              :min="VIEW_ROTATION_DISTANCE_MIN"
+              :max="VIEW_ROTATION_DISTANCE_MAX"
+              step="0.1"
+            />
+            <strong>{{ getViewRotationZoomLabel(viewRotationDraft.zoom) }}</strong>
+          </label>
+        </div>
+
+        <div class="view-rotation-actions">
+          <button
+            type="button"
+            class="view-rotation-secondary"
+            @click="closeViewRotation"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="view-rotation-primary"
+            @click="confirmViewRotation"
+          >
+            立即使用
+          </button>
+        </div>
+      </div>
+    </div>
+
     <MediaModal
       :open="Boolean(previewImage)"
       :src="previewImage"
@@ -2910,6 +3989,717 @@ onBeforeUnmount(() => {
 
 .group:hover .history-stack-actions {
   opacity: 1;
+}
+
+.prompt-system-indicator {
+  position: absolute;
+  left: 0.75rem;
+  top: 0.45rem;
+  z-index: 12;
+  display: inline-flex;
+  max-width: calc(100% - 1.5rem);
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.prompt-system-chain {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgb(52 211 153 / 0.66);
+  border-radius: calc(var(--radius) - 2px);
+  background: rgb(16 185 129 / 0.12);
+  box-shadow: inset 0 0 0 1px rgb(16 185 129 / 0.04);
+  transition:
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.prompt-system-chain:hover,
+.prompt-system-chain:focus-within {
+  border-color: rgb(110 231 183);
+  background: rgb(16 185 129 / 0.18);
+}
+
+.prompt-system-token-wrap,
+.prompt-reference-token-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.prompt-system-token-group {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: rgb(52 211 153);
+}
+
+.prompt-system-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  color: rgb(52 211 153);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.prompt-system-token:focus-visible,
+.prompt-reference-token:focus-visible {
+  outline: none;
+}
+
+.prompt-system-token--camera,
+.prompt-system-token--view {
+  color: rgb(52 211 153);
+}
+
+.prompt-system-popover {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.375rem);
+  z-index: 20;
+  width: min(22rem, calc(100vw - 3rem));
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) + 2px);
+  background: hsl(var(--card));
+  padding: 0.75rem;
+  box-shadow: 0 18px 45px rgb(0 0 0 / 0.35);
+}
+
+.prompt-system-popover--wide {
+  width: min(28rem, calc(100vw - 3rem));
+}
+
+.prompt-system-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.25rem 0;
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.prompt-system-row--stack {
+  display: grid;
+  gap: 0.125rem;
+}
+
+.prompt-reference-token {
+  display: inline-flex;
+  align-items: center;
+  height: 1.625rem;
+  border: 0;
+  border-left: 1px solid rgb(52 211 153 / 0.34);
+  background: transparent;
+  padding: 0 0.5rem;
+  color: rgb(52 211 153);
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.prompt-reference-token--linked {
+  margin-left: 0.125rem;
+}
+
+.prompt-reference-token:hover,
+.prompt-reference-token:focus-visible {
+  background: rgb(16 185 129 / 0.16);
+}
+
+.prompt-reference-popover {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.375rem);
+  z-index: 22;
+  width: 8.75rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) + 2px);
+  background: hsl(var(--card));
+  padding: 0.5rem;
+  box-shadow: 0 18px 45px rgb(0 0 0 / 0.35);
+}
+
+.prompt-reference-preview {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--background));
+}
+
+.prompt-reference-preview img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+}
+
+.prompt-reference-caption {
+  padding-top: 0.375rem;
+  text-align: center;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  line-height: 1rem;
+}
+
+.prompt-textarea--with-system {
+  min-height: 7.5rem;
+  padding-left: var(--prompt-system-offset, 0.75rem);
+  padding-top: 0.5rem;
+}
+
+.prompt-textarea--busy {
+  caret-color: transparent;
+  color: transparent;
+}
+
+.prompt-textarea--busy::placeholder {
+  color: transparent;
+}
+
+.prompt-shimmer-layer {
+  color: hsl(var(--foreground) / 0.68);
+}
+
+.prompt-shimmer-layer--with-system {
+  padding-left: var(--prompt-system-offset, 0.75rem);
+  padding-top: 0.5rem;
+}
+
+.prompt-tools-row {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.prompt-tools-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.prompt-tool-button {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  border: 1px solid hsl(var(--border) / 0.12);
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--background) / 0.2);
+  padding: 0.375rem 0.625rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1rem;
+  opacity: 0.5;
+  transition:
+    opacity 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.prompt-tool-button:hover,
+.prompt-tool-button:focus-visible {
+  border-color: hsl(var(--border) / 0.45);
+  background: hsl(var(--background) / 0.72);
+  color: hsl(var(--foreground));
+  opacity: 1;
+}
+
+.prompt-tool-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px hsl(var(--ring));
+}
+
+.prompt-tool-button--active {
+  border-color: hsl(var(--border) / 0.45);
+  background: hsl(var(--accent) / 0.6);
+  color: hsl(var(--foreground));
+  opacity: 1;
+}
+
+.prompt-tool-button--selected {
+  border-color: rgb(96 165 250);
+  background: rgb(59 130 246);
+  color: white;
+  opacity: 1;
+}
+
+.prompt-tool-button--selected:hover,
+.prompt-tool-button--selected:focus-visible {
+  border-color: rgb(147 197 253);
+  background: rgb(59 130 246);
+  color: white;
+  opacity: 1;
+}
+
+.view-rotation-modal {
+  width: min(21rem, calc(100vw - 2rem));
+  max-height: min(88dvh, 45rem);
+  overflow-y: auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.875rem;
+  background: hsl(var(--card));
+  color: hsl(var(--card-foreground));
+  box-shadow: 0 30px 80px rgb(0 0 0 / 0.45);
+}
+
+.view-rotation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1rem 0.75rem;
+}
+
+.view-rotation-reset {
+  display: inline-flex;
+  height: 2rem;
+  width: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  color: hsl(var(--muted-foreground));
+  transition:
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.view-rotation-reset:hover,
+.view-rotation-reset:focus-visible {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+  outline: none;
+}
+
+.view-rotation-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.25rem;
+  margin: 0 1rem 0.875rem;
+  border-radius: calc(var(--radius) + 2px);
+  background: hsl(var(--muted) / 0.42);
+  padding: 0.25rem;
+}
+
+.view-rotation-tab {
+  height: 2rem;
+  border-radius: calc(var(--radius) - 2px);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition:
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.view-rotation-tab:hover,
+.view-rotation-tab:focus-visible {
+  color: hsl(var(--foreground));
+  outline: none;
+}
+
+.view-rotation-tab--active {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  box-shadow: 0 8px 20px rgb(0 0 0 / 0.18);
+}
+
+.view-rotation-preview-wrap {
+  margin: 0 1rem;
+  border: 1px solid rgb(30 41 59);
+  border-radius: calc(var(--radius) + 4px);
+  background: rgb(7 12 22);
+  padding: 0.5rem;
+}
+
+.view-rotation-readout {
+  width: 100%;
+  height: 1.875rem;
+  border: 1px solid rgb(51 65 85);
+  border-radius: calc(var(--radius) - 2px);
+  background: rgb(12 18 31);
+  padding: 0 0.625rem;
+  text-align: center;
+  color: rgb(226 232 240);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  outline: none;
+}
+
+.view-rotation-sliders {
+  display: grid;
+  gap: 0.625rem;
+  padding: 0.875rem 1rem 0;
+}
+
+.view-rotation-slider {
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr) 3.25rem;
+  align-items: center;
+  gap: 0.625rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.8125rem;
+}
+
+.view-rotation-slider strong {
+  text-align: right;
+  color: hsl(var(--foreground));
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.view-rotation-slider input {
+  height: 1.25rem;
+  appearance: none;
+  background: transparent;
+}
+
+.view-rotation-slider input::-webkit-slider-runnable-track {
+  height: 0.1875rem;
+  border-radius: 9999px;
+  background: hsl(var(--border));
+}
+
+.view-rotation-slider input::-webkit-slider-thumb {
+  width: 0.875rem;
+  height: 0.875rem;
+  margin-top: -0.34375rem;
+  appearance: none;
+  border-radius: 9999px;
+  background: hsl(var(--foreground));
+  box-shadow: 0 0 0 3px hsl(var(--background));
+}
+
+.view-rotation-slider input::-moz-range-track {
+  height: 0.1875rem;
+  border-radius: 9999px;
+  background: hsl(var(--border));
+}
+
+.view-rotation-slider input::-moz-range-thumb {
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 0;
+  border-radius: 9999px;
+  background: hsl(var(--foreground));
+  box-shadow: 0 0 0 3px hsl(var(--background));
+}
+
+.view-rotation-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  padding: 0.875rem 1rem 1rem;
+}
+
+.view-rotation-secondary,
+.view-rotation-primary {
+  display: inline-flex;
+  height: 2.25rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: calc(var(--radius) + 2px);
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition:
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.view-rotation-secondary {
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+.view-rotation-secondary:hover,
+.view-rotation-secondary:focus-visible {
+  background: hsl(var(--muted));
+  outline: none;
+}
+
+.view-rotation-primary {
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+}
+
+.view-rotation-primary:hover,
+.view-rotation-primary:focus-visible {
+  background: hsl(var(--foreground) / 0.88);
+  outline: none;
+}
+
+.camera-parameter-modal {
+  width: min(54rem, calc(100vw - 2rem));
+  max-height: min(82vh, 42rem);
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: 1rem;
+  background: hsl(var(--card));
+  color: hsl(var(--card-foreground));
+  box-shadow: 0 30px 80px rgb(0 0 0 / 0.45);
+}
+
+.camera-parameter-header {
+  position: relative;
+  display: flex;
+  min-height: 3rem;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.camera-parameter-close {
+  position: absolute;
+  right: 1rem;
+  display: inline-flex;
+  height: 2rem;
+  width: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  color: hsl(var(--muted-foreground));
+  transition:
+    color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.camera-parameter-close:hover,
+.camera-parameter-close:focus-visible {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+  outline: none;
+}
+
+.camera-parameter-columns {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  padding: 1.25rem 1.5rem;
+}
+
+.camera-parameter-column {
+  min-width: 0;
+}
+
+.camera-parameter-title {
+  margin-bottom: 0.75rem;
+  text-align: center;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+}
+
+.camera-parameter-wheel {
+  --camera-option-height: 2.25rem;
+  --camera-wheel-height: 13.75rem;
+  position: relative;
+  height: var(--camera-wheel-height);
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) + 2px);
+  background: hsl(var(--muted) / 0.32);
+}
+
+.camera-parameter-selection {
+  pointer-events: none;
+  position: absolute;
+  left: 0.5rem;
+  right: 0.5rem;
+  top: 50%;
+  z-index: 4;
+  height: var(--camera-option-height);
+  border: 1px solid rgb(96 165 250 / 0.28);
+  border-radius: calc(var(--radius) - 2px);
+  background: rgb(59 130 246 / 0.1);
+  box-shadow:
+    0 -1px 0 rgb(96 165 250 / 0.32),
+    0 1px 0 rgb(96 165 250 / 0.32);
+  transform: translateY(-50%);
+}
+
+.camera-parameter-list {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: calc((var(--camera-wheel-height) - var(--camera-option-height)) / 2) 0.5rem;
+  touch-action: pan-y;
+  mask-image: linear-gradient(to bottom, transparent 0%, black 18%, black 82%, transparent 100%);
+  scrollbar-width: none;
+}
+
+.camera-parameter-list::-webkit-scrollbar {
+  display: none;
+}
+
+.camera-parameter-option {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex: 0 0 var(--camera-option-height);
+  min-height: var(--camera-option-height);
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  border-radius: calc(var(--radius) - 2px);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  transition:
+    color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.camera-parameter-option:hover,
+.camera-parameter-option:focus-visible {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+  outline: none;
+}
+
+.camera-parameter-option--active {
+  color: rgb(96 165 250);
+  font-weight: 600;
+}
+
+.camera-parameter-actions {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  border-top: 1px solid hsl(var(--border));
+  padding: 1rem 1.5rem 1.25rem;
+}
+
+.camera-parameter-secondary,
+.camera-parameter-primary {
+  display: inline-flex;
+  min-width: 6.25rem;
+  height: 2.25rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  transition:
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.camera-parameter-secondary {
+  background: hsl(var(--secondary));
+  color: hsl(var(--secondary-foreground));
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.14);
+}
+
+.camera-parameter-secondary:hover,
+.camera-parameter-secondary:focus-visible {
+  background: hsl(var(--secondary) / 0.82);
+  outline: none;
+}
+
+.camera-parameter-primary {
+  background: rgb(59 130 246);
+  color: white;
+  box-shadow: 0 10px 24px rgb(59 130 246 / 0.28);
+}
+
+.camera-parameter-primary:hover,
+.camera-parameter-primary:focus-visible {
+  background: rgb(37 99 235);
+  outline: none;
+}
+
+.prompt-shimmer-char {
+  animation: prompt-char-shimmer 1.55s ease-in-out infinite;
+  color: hsl(var(--foreground) / 0.66);
+}
+
+@keyframes prompt-char-shimmer {
+  0%,
+  88%,
+  100% {
+    color: hsl(var(--foreground) / 0.66);
+    text-shadow: none;
+  }
+
+  44% {
+    color: hsl(var(--foreground));
+    text-shadow: 0 0 0.7em hsl(var(--primary) / 0.65);
+  }
+}
+
+@media (max-width: 760px) {
+  .prompt-tools-group {
+    flex-wrap: nowrap;
+  }
+
+  .prompt-tool-button {
+    min-width: 0;
+    flex: 1 1 0;
+    justify-content: center;
+    padding-left: 0.375rem;
+    padding-right: 0.375rem;
+  }
+
+  .prompt-tool-button span {
+    white-space: nowrap;
+  }
+
+  .view-rotation-modal {
+    width: min(21rem, calc(100vw - 1rem));
+    max-height: calc(100dvh - 1rem);
+  }
+
+  .camera-parameter-modal {
+    width: min(42rem, calc(100vw - 1rem));
+    max-height: calc(100dvh - 1rem);
+  }
+
+  .camera-parameter-columns {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.625rem;
+    max-height: calc(100dvh - 10rem);
+    overflow-y: auto;
+    padding: 1rem;
+  }
+
+  .camera-parameter-title {
+    margin-bottom: 0.5rem;
+  }
+
+  .camera-parameter-wheel {
+    --camera-option-height: 2.125rem;
+    --camera-wheel-height: 10.625rem;
+  }
+
+  .camera-parameter-actions {
+    padding: 0.875rem 1rem 1rem;
+  }
+}
+
+@media (max-width: 520px) {
+  .prompt-textarea--with-system {
+    min-height: 7.5rem;
+  }
+
+  .camera-parameter-columns {
+    grid-template-columns: 1fr;
+    max-height: calc(100dvh - 9rem);
+  }
+
+  .camera-parameter-wheel {
+    --camera-wheel-height: 8.75rem;
+  }
 }
 
 @media (min-width: 480px) {

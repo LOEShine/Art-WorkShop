@@ -42,7 +42,8 @@ interface SubmitVeoVideoExtensionArgs {
 }
 
 const PROMPT_OPTIMIZER_SYSTEM_PROMPT =
-  "你是一个专业的AI图像生成提示词优化助手。你的任务是将用户提供的简单描述优化成详细、具体、适合AI图像生成的提示词。优化后的提示词应该：1) 包含具体的视觉细节（颜色、光线、构图等）2) 使用专业的摄影或艺术术语 3) 保持原意但更加生动和详细 4) 使用换行和逗号分隔不同的描述要素，让结构清晰 5) 关键的视觉元素用简短的短语表达 6) 直接返回优化后的提示词，不要有任何解释或前缀。";
+  "你是资深 AI 图像提示词导演。把用户的短描述改写成可直接用于生图的高质量提示词。要求：1) 保留用户原意，不擅自改变主体 2) 补充主体、场景、构图、镜头/相机参数、光线、色彩、材质、风格、细节、画质约束 3) 如果用户是随机生成需求，直接给出一个完整明确的创意提示词 4) 中文输入优先中文输出 5) 只返回最终提示词，不要解释、标题、编号或前缀。";
+const PROMPT_OPTIMIZER_MODELS = ["gpt-5.5"];
 
 export const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
 export const CODEX_IMAGE_REMOTE_BASE_URL = "https://sgdr.funai.vip";
@@ -120,6 +121,108 @@ function formatNetworkError(error: unknown) {
   }
 
   return error instanceof Error ? error.message : String(error);
+}
+
+function sanitizeHeaders(headers: HeadersInit | undefined): Record<string, string> {
+  if (!headers) {
+    return {};
+  }
+
+  const next: Record<string, string> = {};
+  new Headers(headers).forEach((value, key) => {
+    next[key] = /authorization|api-key|token/i.test(key) ? "Bearer ***" : value;
+  });
+  return next;
+}
+
+function summarizeString(value: string): string {
+  if (/^data:image\/[^;]+;base64,/i.test(value)) {
+    const mime = value.match(/^data:(image\/[^;]+)/i)?.[1] || "image/*";
+    return `[${mime} data url, ${value.length} chars]`;
+  }
+  return value;
+}
+
+function summarizeUnknown(value: unknown): unknown {
+  if (typeof value === "string") {
+    return summarizeString(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => summarizeUnknown(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, nested]) => [key, summarizeUnknown(nested)]),
+    );
+  }
+  return value;
+}
+
+function summarizeRequestBody(body: BodyInit | null | undefined): unknown {
+  if (!body) {
+    return null;
+  }
+
+  if (body instanceof FormData) {
+    const fields: Record<string, unknown> = {};
+    const files: Array<{ field: string; name: string; type: string; size: number }> = [];
+
+    body.forEach((value, key) => {
+      if (value instanceof Blob) {
+        files.push({
+          field: key,
+          name: value instanceof File ? value.name : "",
+          type: value.type || "application/octet-stream",
+          size: value.size,
+        });
+        return;
+      }
+
+      fields[key] = summarizeString(String(value));
+    });
+
+    return { type: "FormData", fields, files };
+  }
+
+  if (typeof body === "string") {
+    try {
+      return summarizeUnknown(JSON.parse(body));
+    } catch {
+      return summarizeString(body);
+    }
+  }
+
+  return Object.prototype.toString.call(body);
+}
+
+function logApiRequest(label: string, url: string, init: RequestInit): void {
+  console.groupCollapsed(`[Art Workshop API] ${label}`);
+  console.log("request", {
+    url,
+    method: init.method || "GET",
+    headers: sanitizeHeaders(init.headers),
+    body: summarizeRequestBody(init.body),
+  });
+  console.groupEnd();
+}
+
+function logApiFailure(url: string, init: RequestInit, response: Response, data: unknown, rawText: string): void {
+  console.groupCollapsed(`[Art Workshop API] 请求失败 ${response.status} ${response.statusText}`);
+  console.log("request", {
+    url,
+    method: init.method || "GET",
+    headers: sanitizeHeaders(init.headers),
+    body: summarizeRequestBody(init.body),
+  });
+  console.log("response", {
+    url: response.url,
+    status: response.status,
+    statusText: response.statusText,
+    headers: sanitizeHeaders(response.headers),
+    body: summarizeUnknown(data),
+    rawText,
+  });
+  console.groupEnd();
 }
 
 export function findVideoUrl(value: unknown, keyHint = "", seen = new WeakSet<object>()): string {
@@ -388,6 +491,7 @@ async function fetchJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (!response.ok) {
+    logApiFailure(url, init, response, data, text);
     throw new Error(extractErrorMessage(data) || `HTTP ${response.status}`);
   }
 
@@ -411,6 +515,20 @@ function dataUrlToBlob(dataUrl: string): Blob {
   }
 
   return new Blob([bytes], { type: mime });
+}
+
+function getDataUrlImageExtension(dataUrl: string): string {
+  const mime = dataUrl.match(/^data:(image\/[^;]+)/)?.[1]?.toLowerCase() || "image/png";
+  if (mime === "image/jpeg" || mime === "image/jpg") {
+    return "jpg";
+  }
+  if (mime === "image/webp") {
+    return "webp";
+  }
+  if (mime === "image/gif") {
+    return "gif";
+  }
+  return "png";
 }
 
 function appendFormField(formData: FormData, key: string, value: unknown): void {
@@ -508,39 +626,48 @@ export async function optimizeImagePrompt(
 ): Promise<string> {
   ensureApiKey(apiKey);
 
-  const payload = await fetchJson<Record<string, unknown>>(
-    buildApiUrl(apiBaseUrl, "/v1/chat/completions"),
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: PROMPT_OPTIMIZER_SYSTEM_PROMPT },
-          { role: "user", content: `请优化这个图像生成提示词：${prompt}` },
-        ],
-        temperature: 0.7,
-        max_tokens: 500,
-      }),
-    },
-  );
+  let lastError: unknown;
+  for (const model of PROMPT_OPTIMIZER_MODELS) {
+    try {
+      const payload = await fetchJson<Record<string, unknown>>(
+        buildApiUrl(apiBaseUrl, "/v1/chat/completions"),
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: "system", content: PROMPT_OPTIMIZER_SYSTEM_PROMPT },
+              { role: "user", content: `请优化这个图像生成提示词：${prompt}` },
+            ],
+            temperature: 0.6,
+            max_tokens: 700,
+          }),
+        },
+      );
 
-  const content = (
-    ((payload.choices as Array<Record<string, unknown>> | undefined)?.[0]?.message as
-      | Record<string, unknown>
-      | undefined)?.content || ""
-  )
-    .toString()
-    .trim();
+      const content = (
+        ((payload.choices as Array<Record<string, unknown>> | undefined)?.[0]?.message as
+          | Record<string, unknown>
+          | undefined)?.content || ""
+      )
+        .toString()
+        .trim();
 
-  if (!content) {
-    throw new Error("优化失败，未获取到结果");
+      if (content) {
+        return content;
+      }
+
+      lastError = new Error("优化失败，未获取到结果");
+    } catch (error) {
+      lastError = error;
+    }
   }
 
-  return content;
+  throw new Error(lastError instanceof Error ? lastError.message : "优化失败，未获取到结果");
 }
 
 export async function generateImage(args: GenerateImageArgs): Promise<GenerateImageResult> {
@@ -648,26 +775,30 @@ export async function generateImage(args: GenerateImageArgs): Promise<GenerateIm
       appendFormField(formData, "moderation", requestBody.moderation || "auto");
 
       sourceImages.forEach((image, index) => {
-        formData.append("image", dataUrlToBlob(image), `image-${index + 1}.png`);
+        formData.append("image[]", dataUrlToBlob(image), `image-${index + 1}.${getDataUrlImageExtension(image)}`);
       });
 
-      return fetchJson<Record<string, unknown>>(endpoint, {
+      const requestInit: RequestInit = {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
         },
         body: formData,
-      });
+      };
+      logApiRequest("图像生成请求", endpoint, requestInit);
+      return fetchJson<Record<string, unknown>>(endpoint, requestInit);
     }
 
-    return fetchJson<Record<string, unknown>>(endpoint, {
+    const requestInit: RequestInit = {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(requestBody),
-    });
+    };
+    logApiRequest("图像生成请求", endpoint, requestInit);
+    return fetchJson<Record<string, unknown>>(endpoint, requestInit);
   };
 
   const splitMultiImageRequest = model === "gpt-image-1.5" || model === "codex-image-2";
