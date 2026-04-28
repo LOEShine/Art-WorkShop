@@ -31,6 +31,7 @@ import {
 } from "lucide-vue-next";
 
 import OpenAiIcon from "@/components/icons/OpenAiIcon.vue";
+import LoadingLottie from "@/components/LoadingLottie.vue";
 import MediaModal from "@/components/MediaModal.vue";
 import MultiAngleThreePreview from "@/components/MultiAngleThreePreview.vue";
 import SettingsModal from "@/components/SettingsModal.vue";
@@ -69,6 +70,7 @@ import { useAppStore } from "@/stores/app";
 import type {
   GalleryHistoryItem,
   ImageModelField,
+  ImageModelId,
   ImageTask,
   SelectOption,
   VideoTask,
@@ -260,7 +262,8 @@ const currentVideoMode = computed(() =>
 const currentVideoUploadLimit = computed(() =>
   getVideoUploadLimit(store.selectedVideoModel, currentVideoConfig.value),
 );
-const currentImageUploadLimit = computed(() => IMAGE_UPLOAD_LIMITS[store.selectedImageModel] ?? 1);
+const effectiveImageModelId = computed(() => getEffectiveImageModelId());
+const currentImageUploadLimit = computed(() => IMAGE_UPLOAD_LIMITS[effectiveImageModelId.value] ?? 1);
 const currentResultImages = computed(() =>
   store.currentTask?.status === "success" ? store.currentTask.resultImages : [],
 );
@@ -291,6 +294,7 @@ const cameraParameterPrompt = computed(() => {
   return `相机设定：${settingsText}`;
 });
 const viewRotationReferenceImage = computed(() => store.uploadedImages[0] || "");
+const canOpenViewRotation = computed(() => Boolean(viewRotationReferenceImage.value));
 const viewRotationDraftDescription = computed(() => getViewRotationDescription(viewRotationDraft.value));
 const hasPromptSystemTokens = computed(() => cameraParametersEnabled.value || viewRotationEnabled.value);
 const viewRotationSummaryRows = computed(() => [
@@ -312,7 +316,13 @@ const viewRotationPrompt = computed(() => {
   }
   return `改变角度，将相机旋转到${promptDescription}`;
 });
-const canGenerateImage = computed(() => buildEffectiveImagePrompt().length > 0 && !store.isGenerating);
+const imageGenerationRequiresSource = computed(() => effectiveImageModelId.value === "qwen-image-edit-multiple-angles");
+const canGenerateImage = computed(
+  () =>
+    buildEffectiveImagePrompt().length > 0 &&
+    !store.isGenerating &&
+    (!imageGenerationRequiresSource.value || buildEffectiveSourceImages().length > 0),
+);
 const isVideoGenerating = computed(() => submittingVideo.value || store.videoTask?.phase === "pending");
 const videoSupportsFirstLastFrames = computed(() =>
   supportsFirstLastFrames(store.selectedVideoModel),
@@ -839,6 +849,9 @@ watch(
       viewRotationReferenceEnabled.value = false;
       viewRotationReferenceOpen.value = false;
       viewRotationReferencePinned.value = false;
+      viewRotationEnabled.value = false;
+      viewRotationOpen.value = false;
+      viewRotationSummaryOpen.value = false;
     }
     updatePromptSystemInlineOffset();
   },
@@ -1474,6 +1487,56 @@ function buildEffectiveImagePrompt() {
   return [rotationPrompt, cameraPrompt, prompt].filter(Boolean).join("\n");
 }
 
+function getEffectiveImageModelId(): ImageModelId {
+  if (viewRotationEnabled.value) {
+    return "qwen-image-edit-multiple-angles";
+  }
+
+  return store.selectedImageModel;
+}
+
+function mapViewRotationZoomToWaveSpeedDistance(zoom: number) {
+  if (zoom < 3.2) {
+    return 2;
+  }
+  if (zoom > 6.6) {
+    return 0;
+  }
+  return 1;
+}
+
+function buildGenerationImageConfig(model: ImageModelId) {
+  const baseConfig = {
+    ...defaultImageConfigs[model],
+    ...store.imageModelConfigs[model],
+  };
+
+  if (model !== "qwen-image-edit-multiple-angles") {
+    return baseConfig;
+  }
+
+  return {
+    ...baseConfig,
+    horizontalAngle: viewRotation.value.rotation,
+    verticalAngle: viewRotation.value.tilt,
+    viewRotationZoom: viewRotation.value.zoom,
+    distance: mapViewRotationZoomToWaveSpeedDistance(viewRotation.value.zoom),
+  };
+}
+
+function buildGenerationImagePrompt(model: ImageModelId) {
+  if (model !== "qwen-image-edit-multiple-angles") {
+    return buildEffectiveImagePrompt();
+  }
+
+  const prompt = store.prompt.trim();
+  const cameraPrompt = cameraParameterPrompt.value;
+  const rotationPrompt = viewRotationPrompt.value;
+  return [rotationPrompt, cameraPrompt, prompt, "保持参考图主体身份、服装、姿态特征和整体画面风格一致"]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function hasBoundReferenceImage() {
   if (!viewRotationReferenceImage.value) {
     return false;
@@ -1524,6 +1587,10 @@ function confirmCameraParameters() {
 }
 
 function openViewRotation() {
+  if (!canOpenViewRotation.value) {
+    return;
+  }
+
   viewRotationDraft.value = { ...viewRotation.value };
   viewRotationOpen.value = true;
 }
@@ -1533,6 +1600,11 @@ function closeViewRotation() {
 }
 
 function confirmViewRotation() {
+  if (!canOpenViewRotation.value) {
+    viewRotationOpen.value = false;
+    return;
+  }
+
   viewRotation.value = { ...viewRotationDraft.value };
   viewRotationEnabled.value = true;
   viewRotationReferenceEnabled.value = Boolean(viewRotationReferenceImage.value);
@@ -2056,14 +2128,17 @@ async function handleGenerateImage() {
 
   const startedAt = Date.now();
   const imagePrompt = buildEffectiveImagePrompt();
+  const generationModel = effectiveImageModelId.value;
+  const generationConfig = buildGenerationImageConfig(generationModel);
+  const generationPrompt = buildGenerationImagePrompt(generationModel);
   const sourceImages = buildEffectiveSourceImages();
   const task = createImageTask({
     createdAt: startedAt,
     status: "generating",
     sourceImages,
     prompt: imagePrompt,
-    model: store.selectedImageModel,
-    modelConfig: { ...currentImageConfig.value },
+    model: generationModel,
+    modelConfig: { ...generationConfig },
     resultImages: [],
     generationTime: 0,
   });
@@ -2072,14 +2147,24 @@ async function handleGenerateImage() {
   store.setIsGenerating(true);
 
   try {
-    const usesCodexImageKey = store.selectedImageModel === "codex-image-2";
+    const usesCodexImageKey = generationModel === "codex-image-2";
     const result = await generateImage({
-      model: store.selectedImageModel,
-      prompt: imagePrompt,
+      model: generationModel,
+      prompt: generationPrompt,
       sourceImages,
-      config: currentImageConfig.value,
-      apiBaseUrl: usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl,
-      apiKey: usesCodexImageKey ? store.codexApiKey : store.apiKey,
+      config: generationConfig,
+      apiBaseUrl:
+        generationModel === "qwen-image-edit-multiple-angles"
+          ? ""
+          : usesCodexImageKey
+            ? CODEX_IMAGE_API_BASE_URL
+            : store.apiBaseUrl,
+      apiKey:
+        generationModel === "qwen-image-edit-multiple-angles"
+          ? ""
+          : usesCodexImageKey
+            ? store.codexApiKey
+            : store.apiKey,
     });
 
     const finalTask: ImageTask = {
@@ -2827,16 +2912,22 @@ onBeforeUnmount(() => {
                           <Camera class="h-3.5 w-3.5" />
                           <span>相机参数</span>
                         </button>
-                        <button
-                          type="button"
-                          class="prompt-tool-button"
-                          :class="viewRotationEnabled ? 'prompt-tool-button--selected' : ''"
-                          :aria-pressed="viewRotationEnabled"
-                          @click="openViewRotation"
+                        <span
+                          class="prompt-tool-button-wrap"
+                          :title="canOpenViewRotation ? '' : '请上传参考图'"
                         >
-                          <Rotate3d class="h-3.5 w-3.5" />
-                          <span>视角转动</span>
-                        </button>
+                          <button
+                            type="button"
+                            class="prompt-tool-button"
+                            :class="viewRotationEnabled ? 'prompt-tool-button--selected' : ''"
+                            :aria-pressed="viewRotationEnabled"
+                            :disabled="!canOpenViewRotation"
+                            @click="openViewRotation"
+                          >
+                            <Rotate3d class="h-3.5 w-3.5" />
+                            <span>视角转动</span>
+                          </button>
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -2871,7 +2962,7 @@ onBeforeUnmount(() => {
               <div class="flex h-full flex-col space-y-4">
                 <div
                   v-if="!store.currentTask"
-                  class="flex aspect-video items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25 bg-muted/50"
+                  class="image-result-frame flex items-center justify-center rounded-lg border-2 border-dashed border-muted-foreground/25 bg-muted/50"
                 >
                   <div class="text-center text-muted-foreground">
                     <ImageIcon class="mx-auto mb-2 h-8 w-8 text-muted-foreground/50" />
@@ -2881,12 +2972,11 @@ onBeforeUnmount(() => {
 
                 <div
                   v-else-if="store.currentTask.status === 'generating'"
-                  class="flex aspect-video items-center justify-center rounded-md bg-muted"
+                  class="image-result-frame relative flex items-center justify-center overflow-hidden rounded-md bg-muted"
                 >
-                  <div class="text-center">
-                    <LoaderCircle class="mx-auto mb-2 h-8 w-8 animate-spin text-primary" />
-                    <p class="text-sm text-muted-foreground">生成中...</p>
-                    <p class="mt-1 font-mono text-xs text-muted-foreground">
+                  <LoadingLottie class="image-result-loading-animation" />
+                  <div class="image-result-loading-status">
+                    <p class="font-mono text-xs font-bold text-muted-foreground">
                       {{ formatElapsed(currentImageElapsed) }}
                     </p>
                   </div>
@@ -2897,7 +2987,7 @@ onBeforeUnmount(() => {
                   class="space-y-3"
                 >
                   <div class="space-y-2">
-                    <div class="relative flex aspect-square items-center justify-center overflow-hidden rounded-md bg-muted">
+                    <div class="image-result-frame relative flex items-center justify-center overflow-hidden rounded-md bg-muted">
                       <img
                         :src="activeResultImage"
                         :alt="`结果 ${activeResultImageIndex + 1}`"
@@ -3939,6 +4029,31 @@ onBeforeUnmount(() => {
   line-height: 1.05;
 }
 
+.image-result-frame {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  min-height: 0;
+}
+
+.image-result-loading-animation {
+  pointer-events: none;
+  position: absolute;
+  left: 50%;
+  top: -30%;
+  height: 150%;
+  width: 150%;
+  transform: translateX(-50%);
+}
+
+.image-result-loading-status {
+  pointer-events: none;
+  position: absolute;
+  left: 50%;
+  top: 82%;
+  transform: translateX(-50%);
+  text-align: center;
+}
+
 .history-stack {
   position: relative;
   width: 100%;
@@ -4201,6 +4316,14 @@ onBeforeUnmount(() => {
     border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+.prompt-tool-button-wrap {
+  display: inline-flex;
+}
+
+.prompt-tool-button-wrap > .prompt-tool-button {
+  width: 100%;
+}
+
 .prompt-tool-button:hover,
 .prompt-tool-button:focus-visible {
   border-color: hsl(var(--border) / 0.45);
@@ -4212,6 +4335,23 @@ onBeforeUnmount(() => {
 .prompt-tool-button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 1px hsl(var(--ring));
+}
+
+.prompt-tool-button:disabled {
+  cursor: default;
+  border-color: hsl(var(--border) / 0.1);
+  background: hsl(var(--background) / 0.12);
+  color: hsl(var(--muted-foreground) / 0.62);
+  opacity: 0.38;
+}
+
+.prompt-tool-button:disabled:hover,
+.prompt-tool-button:disabled:focus-visible {
+  border-color: hsl(var(--border) / 0.1);
+  background: hsl(var(--background) / 0.12);
+  color: hsl(var(--muted-foreground) / 0.62);
+  opacity: 0.38;
+  box-shadow: none;
 }
 
 .prompt-tool-button--active {
@@ -4649,6 +4789,11 @@ onBeforeUnmount(() => {
     justify-content: center;
     padding-left: 0.375rem;
     padding-right: 0.375rem;
+  }
+
+  .prompt-tool-button-wrap {
+    min-width: 0;
+    flex: 1 1 0;
   }
 
   .prompt-tool-button span {

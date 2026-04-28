@@ -4,7 +4,8 @@ export type ImageModelId =
   | "gpt-image-1.5"
   | "codex-image-2"
   | "gpt-image-1.5-official"
-  | "gemini-3-pro-image-preview";
+  | "gemini-3-pro-image-preview"
+  | "qwen-image-edit-multiple-angles";
 
 export type VideoModelId = "veo3" | "hailuo" | "seedance" | "sora";
 export type VideoMode = "text" | "image" | "first-last";

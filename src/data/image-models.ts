@@ -5,6 +5,7 @@ export const IMAGE_UPLOAD_LIMITS: Record<ImageModelId, number> = {
   "codex-image-2": 16,
   "gpt-image-1.5-official": 16,
   "gemini-3-pro-image-preview": 14,
+  "qwen-image-edit-multiple-angles": 3,
 };
 
 export const IMAGE_MODELS: ImageModelDefinition[] = [
@@ -132,6 +133,45 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
           { value: "1K", label: "1K" },
           { value: "2K", label: "2K" },
           { value: "4K", label: "4K" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "qwen-image-edit-multiple-angles",
+    name: "Qwen 多角度",
+    description: "WaveSpeed 多角度图像编辑模型",
+    options: [
+      {
+        key: "size",
+        label: "分辨率",
+        default: "auto",
+        preview: true,
+        options: [
+          { value: "auto", label: "跟随参考图" },
+          { value: "1024x1024", label: "1024×1024" },
+          { value: "1024x1536", label: "1024×1536" },
+          { value: "1536x1024", label: "1536×1024" },
+        ],
+      },
+      {
+        key: "outputFormat",
+        label: "输出格式",
+        default: "jpeg",
+        compact: true,
+        options: [
+          { value: "jpeg", label: "JPEG" },
+          { value: "png", label: "PNG" },
+          { value: "webp", label: "WebP" },
+        ],
+      },
+      {
+        key: "seed",
+        label: "种子",
+        default: -1,
+        options: [
+          { value: -1, label: "随机" },
+          { value: 42, label: "固定 42" },
         ],
       },
     ],

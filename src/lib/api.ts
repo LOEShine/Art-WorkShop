@@ -48,6 +48,7 @@ const PROMPT_OPTIMIZER_MODELS = ["gpt-5.5"];
 export const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
 export const CODEX_IMAGE_REMOTE_BASE_URL = "https://sgdr.funai.vip";
 export const CODEX_IMAGE_API_BASE_URL = "/codex-image-api";
+export const WAVESPEED_API_BASE_URL = "/wavespeed-api";
 
 export function buildApiUrl(baseUrl: string, path: string): string {
   if (/^https?:\/\//i.test(path)) {
@@ -548,6 +549,86 @@ function normalizeImageCount(value: unknown): number {
   return Math.min(Math.max(Math.floor(count), 1), 10);
 }
 
+function normalizeDegrees360(degrees: unknown): number {
+  const value = Number(degrees || 0);
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return ((Math.round(value) % 360) + 360) % 360;
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(number, min), max);
+}
+
+function mapViewRotationZoomToWaveSpeedDistance(zoom: unknown): number {
+  const value = clampNumber(zoom, 1, 8, 5);
+  if (value < 3.2) {
+    return 2;
+  }
+  if (value > 6.6) {
+    return 0;
+  }
+  return 1;
+}
+
+function normalizeWaveSpeedSize(value: unknown): string | undefined {
+  const size = String(value || "").trim();
+  const match = size.match(/^(\d+)x(\d+)$/i);
+  if (!match) {
+    return undefined;
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) {
+    return undefined;
+  }
+
+  return `${Math.round(width)}*${Math.round(height)}`;
+}
+
+function fitWaveSpeedDimensionSize(width: number, height: number): string {
+  const maxDimension = 1536;
+  const minDimension = 256;
+  const scaleDown = Math.min(1, maxDimension / Math.max(width, height));
+  const scaledWidth = width * scaleDown;
+  const scaledHeight = height * scaleDown;
+  const scaleUp = Math.max(1, minDimension / Math.min(scaledWidth, scaledHeight));
+
+  return `${Math.round(scaledWidth * scaleUp)}*${Math.round(scaledHeight * scaleUp)}`;
+}
+
+function getImageDimensions(source: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    image.onerror = () => reject(new Error("无法读取参考图尺寸"));
+    image.src = source;
+  });
+}
+
+async function resolveWaveSpeedSize(config: ImageConfigRecord, sourceImages: string[]): Promise<string | undefined> {
+  const configuredSize = String(config.size || "auto").trim();
+  if (configuredSize && configuredSize !== "auto") {
+    return normalizeWaveSpeedSize(configuredSize);
+  }
+
+  const sourceImage = sourceImages[0];
+  if (!sourceImage) {
+    return undefined;
+  }
+
+  const { width, height } = await getImageDimensions(sourceImage);
+  return fitWaveSpeedDimensionSize(width, height);
+}
+
 function buildGeminiParts(prompt: string, sourceImages: string[]): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = [{ text: prompt }];
   for (const image of sourceImages) {
@@ -616,7 +697,82 @@ function extractGeneratedImages(payload: Record<string, unknown>, model: ImageMo
     }
   }
 
+  if (model === "qwen-image-edit-multiple-angles") {
+    const roots = [
+      payload,
+      payload.data as Record<string, unknown> | undefined,
+      payload.result as Record<string, unknown> | undefined,
+      payload.output as Record<string, unknown> | undefined,
+    ].filter(Boolean) as Array<Record<string, unknown>>;
+
+    for (const root of roots) {
+      const collections = [root.outputs, root.images, root.image_urls, root.urls];
+      for (const collection of collections) {
+        if (Array.isArray(collection)) {
+          for (const item of collection) {
+            if (typeof item === "string" && item.trim()) {
+              images.push(item.startsWith("http") || item.startsWith("data:image") ? item : `data:image/png;base64,${item}`);
+              continue;
+            }
+            if (item && typeof item === "object") {
+              const record = item as Record<string, unknown>;
+              const url = String(record.url || record.image || record.output || "").trim();
+              if (url) {
+                images.push(url.startsWith("http") || url.startsWith("data:image") ? url : `data:image/png;base64,${url}`);
+              }
+            }
+          }
+        }
+      }
+
+      const directImage = String(root.image || root.output_image || "").trim();
+      if (directImage) {
+        images.push(
+          directImage.startsWith("http") || directImage.startsWith("data:image")
+            ? directImage
+            : `data:image/png;base64,${directImage}`,
+        );
+      }
+    }
+  }
+
   return images;
+}
+
+function getWaveSpeedPredictionId(payload: Record<string, unknown>): string {
+  const data = payload.data as Record<string, unknown> | undefined;
+  return String(data?.id || payload.id || "").trim();
+}
+
+async function pollWaveSpeedPrediction(id: string): Promise<Record<string, unknown>> {
+  let lastPayload: Record<string, unknown> = {};
+
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+
+    const requestInit: RequestInit = {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+    };
+    const payload = await fetchJson<Record<string, unknown>>(
+      buildApiUrl(WAVESPEED_API_BASE_URL, `/predictions/${encodeURIComponent(id)}/result`),
+      requestInit,
+    );
+    lastPayload = payload;
+    const data = (payload.data as Record<string, unknown> | undefined) || payload;
+    const status = String(data.status || payload.status || "").toLowerCase();
+
+    if (status === "completed" || status === "succeeded" || status === "success") {
+      return payload;
+    }
+    if (status === "failed" || status === "error") {
+      throw new Error(extractErrorMessage(payload) || "WaveSpeed 多角度生成失败");
+    }
+  }
+
+  throw new Error(extractErrorMessage(lastPayload) || "WaveSpeed 多角度生成超时");
 }
 
 export async function optimizeImagePrompt(
@@ -672,12 +828,39 @@ export async function optimizeImagePrompt(
 
 export async function generateImage(args: GenerateImageArgs): Promise<GenerateImageResult> {
   const { apiBaseUrl, apiKey, config, model, prompt, sourceImages } = args;
-  ensureApiKey(apiKey);
+  if (model !== "qwen-image-edit-multiple-angles") {
+    ensureApiKey(apiKey);
+  }
 
   let endpoint = buildApiUrl(apiBaseUrl, "/v1/images/generations");
   let body: Record<string, unknown> = { model, prompt };
 
-  if (model === "gpt-image-1.5") {
+  if (model === "qwen-image-edit-multiple-angles") {
+    if (sourceImages.length === 0) {
+      throw new Error("Qwen 多角度需要先上传参考图片");
+    }
+
+    const size = await resolveWaveSpeedSize(config, sourceImages);
+    const seed = Number(config.seed);
+    endpoint = buildApiUrl(WAVESPEED_API_BASE_URL, "/wavespeed-ai/qwen-image/edit-multiple-angles");
+    body = {
+      images: sourceImages.slice(0, 3),
+      prompt: prompt.trim() || "Keep the subject identity, outfit, and visual style consistent.",
+      horizontal_angle: normalizeDegrees360(config.horizontalAngle),
+      vertical_angle: clampNumber(config.verticalAngle, -30, 60, 0),
+      distance: clampNumber(
+        config.distance,
+        0,
+        2,
+        mapViewRotationZoomToWaveSpeedDistance(config.viewRotationZoom),
+      ),
+      output_format: String(config.outputFormat || "jpeg"),
+      enable_base64_output: false,
+      enable_sync_mode: true,
+      ...(size ? { size } : {}),
+      ...(Number.isFinite(seed) && seed >= 0 ? { seed } : {}),
+    };
+  } else if (model === "gpt-image-1.5") {
     const count = normalizeImageCount(config.n);
     const size = String(config.size || "auto");
     body = {
@@ -793,7 +976,7 @@ export async function generateImage(args: GenerateImageArgs): Promise<GenerateIm
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        ...(model === "qwen-image-edit-multiple-angles" ? {} : { Authorization: `Bearer ${apiKey}` }),
       },
       body: JSON.stringify(requestBody),
     };
@@ -809,13 +992,23 @@ export async function generateImage(args: GenerateImageArgs): Promise<GenerateIm
   const payloadResults = await Promise.allSettled(
     requestBodies.map((requestBody) => requestImagePayload(requestBody)),
   );
-  const payloads = payloadResults.flatMap((result) =>
+  let payloads = payloadResults.flatMap((result) =>
     result.status === "fulfilled" ? [result.value] : [],
   );
   const firstError = payloadResults.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
   )?.reason;
-  const images = payloads.flatMap((payload) => extractGeneratedImages(payload, model));
+  let images = payloads.flatMap((payload) => extractGeneratedImages(payload, model));
+
+  if (model === "qwen-image-edit-multiple-angles" && images.length === 0 && payloads[0]) {
+    const predictionId = getWaveSpeedPredictionId(payloads[0]);
+    if (predictionId) {
+      const payload = await pollWaveSpeedPrediction(predictionId);
+      payloads = [payload];
+      images = extractGeneratedImages(payload, model);
+    }
+  }
+
   if (images.length === 0) {
     const errorMessage = payloads.map((payload) => extractErrorMessage(payload)).find(Boolean);
     throw new Error(errorMessage || (firstError instanceof Error ? firstError.message : "") || "未能获取生成的图片");
