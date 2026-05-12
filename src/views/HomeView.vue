@@ -3989,7 +3989,7 @@ onBeforeUnmount(() => {
 
 .app-header {
   border-color: hsl(var(--border));
-  background: hsl(var(--background) / 0.96);
+  background: hsl(var(--background) / 0.98);
   box-shadow: none;
 }
 
@@ -4154,7 +4154,7 @@ onBeforeUnmount(() => {
   width: 9.5rem;
   border: 1px solid hsl(var(--border));
   border-radius: var(--radius);
-  background: hsl(var(--card));
+  background: hsl(var(--secondary));
   padding: 0.25rem;
   box-shadow: none;
 }
@@ -4667,8 +4667,12 @@ onBeforeUnmount(() => {
 
 .prompt-editor {
   border-color: hsl(var(--input) / 0.82);
-  background: hsl(var(--card));
+  background: hsl(var(--background));
   box-shadow: none;
+}
+
+.dark .prompt-editor {
+  background: hsl(var(--card));
 }
 
 .prompt-editor:focus-within {
