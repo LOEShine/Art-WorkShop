@@ -245,7 +245,7 @@ async function testKey(kind: "api" | "codex") {
 
           <div
             v-if="saved"
-            class="rounded-md bg-green-500/10 p-2 text-sm text-green-500"
+            class="settings-status--success rounded-md p-2 text-sm"
           >
             <Check class="mr-2 inline h-4 w-4" />
             配置已保存！
@@ -254,7 +254,7 @@ async function testKey(kind: "api" | "codex") {
           <div
             v-if="apiTestStatus"
             class="flex items-center rounded-md p-2 text-sm"
-            :class="apiTestStatus === 'success' ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'"
+            :class="apiTestStatus === 'success' ? 'settings-status--success' : 'settings-status--error'"
           >
             <Check
               v-if="apiTestStatus === 'success'"
@@ -270,7 +270,7 @@ async function testKey(kind: "api" | "codex") {
           <div
             v-if="codexTestStatus"
             class="flex items-center rounded-md p-2 text-sm"
-            :class="codexTestStatus === 'success' ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'"
+            :class="codexTestStatus === 'success' ? 'settings-status--success' : 'settings-status--error'"
           >
             <Check
               v-if="codexTestStatus === 'success'"
@@ -294,3 +294,15 @@ async function testKey(kind: "api" | "codex") {
     </div>
   </div>
 </template>
+
+<style scoped>
+.settings-status--success {
+  background: hsl(var(--success) / 0.12);
+  color: hsl(var(--success));
+}
+
+.settings-status--error {
+  background: hsl(var(--destructive) / 0.1);
+  color: hsl(var(--destructive));
+}
+</style>

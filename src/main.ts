@@ -20,6 +20,7 @@ app.use(pinia);
 app.use(router);
 
 const store = useAppStore(pinia);
+store.applyTheme();
 void store.hydrateHistory();
 
 app.mount("#app");

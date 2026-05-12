@@ -837,7 +837,7 @@ export async function generateImage(args: GenerateImageArgs): Promise<GenerateIm
 
   if (model === "qwen-image-edit-multiple-angles") {
     if (sourceImages.length === 0) {
-      throw new Error("Qwen 多角度需要先上传参考图片");
+      throw new Error("多角度生成需要先上传参考图片");
     }
 
     const size = await resolveWaveSpeedSize(config, sourceImages);

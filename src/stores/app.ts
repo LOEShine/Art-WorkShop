@@ -25,6 +25,7 @@ import type {
   ImageConfigValue,
   ImageModelId,
   ImageTask,
+  ThemeMode,
   VideoConfigRecord,
   VideoConfigValue,
   VideoModelId,
@@ -38,11 +39,20 @@ interface PersistedState {
   apiBaseUrl: string;
   apiKey: string;
   codexApiKey: string;
+  themeMode: ThemeMode;
   generationMode: GenerationMode;
   selectedImageModel: ImageModelId;
   imageModelConfigs: ReturnType<typeof createDefaultImageConfigs>;
   selectedVideoModel: VideoModelId;
   videoConfigs: ReturnType<typeof createDefaultVideoConfigs>;
+}
+
+function getPreferredThemeMode(): ThemeMode {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function normalizeThemeMode(value: unknown): ThemeMode {
+  return value === "light" || value === "dark" ? value : getPreferredThemeMode();
 }
 
 function buildPersistedState(): PersistedState {
@@ -52,6 +62,7 @@ function buildPersistedState(): PersistedState {
     apiBaseUrl: VECTOR_API_BASE_URL,
     apiKey: "",
     codexApiKey: "",
+    themeMode: getPreferredThemeMode(),
     generationMode: "image",
     selectedImageModel: DEFAULT_IMAGE_MODEL_ID,
     imageModelConfigs,
@@ -97,6 +108,7 @@ function readPersistedState(): PersistedState {
       ...parsed,
       apiBaseUrl: VECTOR_API_BASE_URL,
       codexApiKey: parsed.codexApiKey ?? defaults.codexApiKey ?? "",
+      themeMode: normalizeThemeMode(parsed.themeMode ?? defaults.themeMode),
       imageModelConfigs,
       videoConfigs,
     };
@@ -112,6 +124,7 @@ export const useAppStore = defineStore("artWorkshop", {
       apiBaseUrl: persisted.apiBaseUrl,
       apiKey: persisted.apiKey,
       codexApiKey: persisted.codexApiKey,
+      themeMode: persisted.themeMode,
       generationMode: persisted.generationMode,
       selectedImageModel: persisted.selectedImageModel,
       imageModelConfigs: persisted.imageModelConfigs,
@@ -168,6 +181,7 @@ export const useAppStore = defineStore("artWorkshop", {
         apiBaseUrl: this.apiBaseUrl,
         apiKey: this.apiKey,
         codexApiKey: this.codexApiKey,
+        themeMode: this.themeMode,
         generationMode: this.generationMode,
         selectedImageModel: this.selectedImageModel,
         imageModelConfigs: this.imageModelConfigs,
@@ -176,6 +190,18 @@ export const useAppStore = defineStore("artWorkshop", {
       };
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    },
+    applyTheme() {
+      document.documentElement.classList.toggle("dark", this.themeMode === "dark");
+      document.documentElement.dataset.theme = this.themeMode;
+    },
+    setThemeMode(mode: ThemeMode) {
+      this.themeMode = mode;
+      this.applyTheme();
+      this.persist();
+    },
+    toggleTheme() {
+      this.setThemeMode(this.themeMode === "dark" ? "light" : "dark");
     },
     setApiSettings(apiKey: string, codexApiKey: string) {
       this.apiBaseUrl = VECTOR_API_BASE_URL;

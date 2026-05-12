@@ -1,4 +1,5 @@
 export type GenerationMode = "image" | "video";
+export type ThemeMode = "light" | "dark";
 
 export type ImageModelId =
   | "gpt-image-1.5"

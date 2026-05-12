@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
 import {
-  BookOpen,
   Bot,
   Camera,
   ChevronLeft,
@@ -13,6 +11,7 @@ import {
   Download,
   Image as ImageIcon,
   LoaderCircle,
+  Moon,
   Pencil,
   Play,
   Plus,
@@ -21,6 +20,7 @@ import {
   Settings,
   Sparkles,
   StepForward,
+  Sun,
   Trash2,
   Type as TypeIcon,
   Upload,
@@ -118,10 +118,10 @@ interface VideoUploadSlot extends UploadPreviewItem {
   slotIndex: number;
 }
 
-const router = useRouter();
 const store = useAppStore();
 const defaultImageConfigs = createDefaultImageConfigs();
 const defaultVideoConfigs = createDefaultVideoConfigs();
+const HIDDEN_IMAGE_MODEL_IDS = new Set<ImageModelId>(["qwen-image-edit-multiple-angles"]);
 const CAMERA_PARAMETER_COLUMNS: CameraParameterColumn[] = [
   {
     key: "cameraType",
@@ -177,6 +177,7 @@ const currentVideoElapsed = ref(0);
 const historyImageResolutionLabels = ref<Record<string, string>>({});
 const historyVideoResolutionLabels = ref<Record<string, string>>({});
 const historyVideoDurationLabels = ref<Record<string, string>>({});
+const brokenHistoryImageKeys = ref<Set<string>>(new Set());
 const optimizingPrompt = ref(false);
 const submittingVideo = ref(false);
 const promptTextarea = ref<HTMLTextAreaElement | null>(null);
@@ -217,6 +218,14 @@ function getImageModelIcon(modelId: string) {
   return OpenAiIcon;
 }
 
+function getImageModelDisplayName(modelId: ImageModelId) {
+  if (modelId === "qwen-image-edit-multiple-angles") {
+    return "多角度";
+  }
+
+  return IMAGE_MODELS.find((model) => model.id === modelId)?.name || modelId;
+}
+
 function getVideoModelIcon(modelKey: string) {
   if (modelKey === "sora") {
     return OpenAiIcon;
@@ -241,14 +250,29 @@ function getVideoBadgeLabel(badge: string) {
   return badge;
 }
 
+const selectableImageModels = computed(() => IMAGE_MODELS.filter((model) => !HIDDEN_IMAGE_MODEL_IDS.has(model.id)));
+const fallbackImageModel = computed(() => selectableImageModels.value[0] ?? IMAGE_MODELS[0]);
+const selectedVisibleImageModelId = computed(() =>
+  HIDDEN_IMAGE_MODEL_IDS.has(store.selectedImageModel) ? fallbackImageModel.value.id : store.selectedImageModel,
+);
 const currentImageModel = computed(
-  () => IMAGE_MODELS.find((model) => model.id === store.selectedImageModel) ?? IMAGE_MODELS[0],
+  () => selectableImageModels.value.find((model) => model.id === selectedVisibleImageModelId.value) ?? fallbackImageModel.value,
 );
 
 const currentImageConfig = computed(() => ({
-  ...defaultImageConfigs[store.selectedImageModel],
-  ...store.imageModelConfigs[store.selectedImageModel],
+  ...defaultImageConfigs[selectedVisibleImageModelId.value],
+  ...store.imageModelConfigs[selectedVisibleImageModelId.value],
 }));
+
+watch(
+  () => store.selectedImageModel,
+  (model) => {
+    if (HIDDEN_IMAGE_MODEL_IDS.has(model)) {
+      store.setSelectedImageModel(fallbackImageModel.value.id);
+    }
+  },
+  { immediate: true },
+);
 
 const currentVideoConfig = computed(() => ({
   ...defaultVideoConfigs[store.selectedVideoModel],
@@ -324,6 +348,9 @@ const canGenerateImage = computed(
     (!imageGenerationRequiresSource.value || buildEffectiveSourceImages().length > 0),
 );
 const isVideoGenerating = computed(() => submittingVideo.value || store.videoTask?.phase === "pending");
+const canGenerateVideo = computed(
+  () => String(currentVideoConfig.value.prompt || "").trim().length > 0 && !isVideoGenerating.value,
+);
 const videoSupportsFirstLastFrames = computed(() =>
   supportsFirstLastFrames(store.selectedVideoModel),
 );
@@ -606,6 +633,13 @@ const currentVideoUploadCount = computed(() =>
 
 const visibleHistory = computed<GalleryHistoryItem[]>(() => {
   const imageHistory = store.history
+    .map((item) => ({
+      ...item,
+      resultImages: item.resultImages.filter((image, index) => {
+        const source = String(image || "").trim();
+        return source.length > 0 && !brokenHistoryImageKeys.value.has(getHistoryImageSourceKey(item.id, source, index));
+      }),
+    }))
     .filter((item) => item.status === "success" && item.resultImages.length > 0)
     .map((item) => ({ ...item, kind: "image" as const }));
 
@@ -618,6 +652,20 @@ const visibleHistory = computed<GalleryHistoryItem[]>(() => {
 
 function getGalleryHistoryKey(task: GalleryHistoryItem) {
   return `${task.kind}-${task.id}`;
+}
+
+function getHistoryImageSourceKey(taskId: string, source: string, index: number) {
+  return `${taskId}:${index}:${source}`;
+}
+
+function markHistoryImageBroken(task: GalleryHistoryItem, source: string, index: number) {
+  if (task.kind !== "image") {
+    return;
+  }
+
+  const next = new Set(brokenHistoryImageKeys.value);
+  next.add(getHistoryImageSourceKey(task.id, source, index));
+  brokenHistoryImageKeys.value = next;
 }
 
 function setHistoryImageResolutionLabel(task: GalleryHistoryItem, event: Event) {
@@ -939,10 +987,6 @@ async function refreshVideoTask(force = false) {
   }
 }
 
-function openPromptLibrary() {
-  router.push("/prompts");
-}
-
 function clampIndex(index: number, length: number) {
   if (length <= 0) {
     return 0;
@@ -1132,9 +1176,9 @@ function getVideoTaskStatusLabel(task: VideoTask | null) {
 
 function getVideoTaskStatusClass(task: VideoTask | null) {
   if (!task) return "bg-muted/50 text-muted-foreground";
-  if (task.phase === "success") return "bg-green-500/10 text-green-500";
-  if (task.phase === "error") return "bg-red-500/10 text-red-500";
-  return "bg-blue-500/10 text-blue-500";
+  if (task.phase === "success") return "status-badge--success";
+  if (task.phase === "error") return "status-badge--error";
+  return "status-badge--info";
 }
 
 function getAspectPreviewSize(text: string) {
@@ -1492,7 +1536,7 @@ function getEffectiveImageModelId(): ImageModelId {
     return "qwen-image-edit-multiple-angles";
   }
 
-  return store.selectedImageModel;
+  return selectedVisibleImageModelId.value;
 }
 
 function mapViewRotationZoomToWaveSpeedDistance(zoom: number) {
@@ -2247,7 +2291,7 @@ async function handleVideoDrop(event: DragEvent, targetIndex: number | null = nu
 }
 
 async function handleSubmitVideo() {
-  if (isVideoGenerating.value) {
+  if (!canGenerateVideo.value) {
     return;
   }
 
@@ -2447,17 +2491,16 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-background">
-    <header class="sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+  <div class="app-shell min-h-screen">
+    <header class="app-header sticky top-0 z-50 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div class="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
         <div class="flex items-center gap-2">
-          <img
-            src="/favicon.svg"
-            alt="logo"
-            class="h-6 w-6"
+          <span
+            aria-hidden="true"
+            class="brand-mark"
           />
           <h1
-            class="text-2xl font-bold leading-none"
+            class="brand-title text-2xl font-bold leading-none"
             style="font-family: 'Caveat', cursive"
           >
             Art Workshop
@@ -2467,16 +2510,24 @@ onBeforeUnmount(() => {
         <div class="flex items-center gap-2">
           <button
             type="button"
-            class="inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-2 text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
-            @click="openPromptLibrary"
+            class="header-icon-button inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-accent-foreground"
+            :aria-label="store.themeMode === 'dark' ? '切换浅色模式' : '切换深色模式'"
+            :title="store.themeMode === 'dark' ? '切换浅色模式' : '切换深色模式'"
+            @click="store.toggleTheme()"
           >
-            <BookOpen class="h-4 w-4" />
-            <span class="hidden sm:inline">提示词库</span>
+            <Sun
+              v-if="store.themeMode === 'dark'"
+              class="h-5 w-5"
+            />
+            <Moon
+              v-else
+              class="h-5 w-5"
+            />
           </button>
 
           <button
             type="button"
-            class="inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-accent-foreground"
+            class="header-icon-button inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent hover:text-accent-foreground"
             @click="settingsOpen = true"
           >
             <Settings class="h-5 w-5" />
@@ -2485,8 +2536,8 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <main class="mx-auto max-w-7xl px-4 py-6">
-      <div class="mb-6 flex justify-center">
+    <main class="workspace-main mx-auto max-w-7xl px-4 py-6">
+      <div class="workspace-mode-row mb-6 flex justify-center">
         <div
           class="mode-switch"
           :data-mode="store.generationMode"
@@ -2495,7 +2546,7 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="mode-switch-button"
-            :class="store.generationMode === 'image' ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            :class="store.generationMode === 'image' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
             @click="store.setGenerationMode('image')"
           >
             <ImageIcon class="h-4 w-4" />
@@ -2504,7 +2555,7 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="mode-switch-button"
-            :class="store.generationMode === 'video' ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            :class="store.generationMode === 'video' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
             @click="store.setGenerationMode('video')"
           >
             <Video class="h-4 w-4" />
@@ -2514,10 +2565,10 @@ onBeforeUnmount(() => {
       </div>
 
       <template v-if="store.generationMode === 'image'">
-        <div class="grid gap-6 lg:grid-cols-[280px_1fr_320px]">
-          <section class="rounded-xl border bg-card text-card-foreground shadow h-fit">
+        <div class="workspace-grid grid gap-6 lg:grid-cols-[280px_1fr_320px]">
+          <section class="app-panel rounded-xl border bg-card text-card-foreground shadow h-fit">
             <div class="flex flex-col space-y-1.5 p-6 pb-3">
-              <h3 class="text-base font-semibold tracking-tight">图片 & 模型</h3>
+              <h3 class="panel-title text-base font-semibold">图片 & 模型</h3>
             </div>
 
             <div class="space-y-6 p-6 pt-0">
@@ -2529,11 +2580,11 @@ onBeforeUnmount(() => {
 
                 <div class="space-y-1">
                   <button
-                    v-for="model in IMAGE_MODELS"
+                    v-for="model in selectableImageModels"
                     :key="model.id"
                     type="button"
                     class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors"
-                    :class="store.selectedImageModel === model.id ? 'bg-primary text-primary-foreground' : 'hover:bg-accent hover:text-accent-foreground'"
+                    :class="selectedVisibleImageModelId === model.id ? 'bg-primary text-primary-foreground' : 'hover:bg-accent hover:text-accent-foreground'"
                     @click="store.setSelectedImageModel(model.id)"
                   >
                     <component
@@ -2644,10 +2695,10 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="rounded-xl border bg-card text-card-foreground shadow">
+          <section class="app-panel rounded-xl border bg-card text-card-foreground shadow">
             <div class="p-6">
               <div class="flex h-full flex-col space-y-4">
-                <div class="flex items-center gap-2 text-base font-semibold">参数 & 提示词</div>
+                <div class="panel-title flex items-center gap-2 text-base font-semibold">参数 & 提示词</div>
 
                 <div
                   v-for="field in currentImageModel.options"
@@ -2665,8 +2716,8 @@ onBeforeUnmount(() => {
                       :key="String(option.value)"
                       type="button"
                       class="image-option-button image-option-button--preview"
-                      :class="currentImageConfig[field.key] === option.value ? 'bg-blue-500 text-white' : 'bg-muted/50 text-muted-foreground hover:bg-muted'"
-                      @click="store.setImageModelConfig(store.selectedImageModel, field.key, option.value)"
+                      :class="currentImageConfig[field.key] === option.value ? 'image-option-button--selected' : 'bg-muted/50 text-muted-foreground hover:bg-muted'"
+                      @click="store.setImageModelConfig(selectedVisibleImageModelId, field.key, option.value)"
                     >
                       <div class="flex h-5 items-end justify-center">
                         <div
@@ -2687,8 +2738,8 @@ onBeforeUnmount(() => {
                       :key="String(option.value)"
                       type="button"
                       class="image-option-button image-option-button--compact"
-                      :class="currentImageConfig[field.key] === option.value ? 'bg-blue-500 text-white' : 'bg-muted/50 hover:bg-muted'"
-                      @click="store.setImageModelConfig(store.selectedImageModel, field.key, option.value)"
+                      :class="currentImageConfig[field.key] === option.value ? 'image-option-button--selected' : 'bg-muted/50 hover:bg-muted'"
+                      @click="store.setImageModelConfig(selectedVisibleImageModelId, field.key, option.value)"
                     >
                       {{ option.label }}
                     </button>
@@ -2703,8 +2754,8 @@ onBeforeUnmount(() => {
                       :key="String(option.value)"
                       type="button"
                       class="image-option-button image-option-button--plain"
-                      :class="currentImageConfig[field.key] === option.value ? 'bg-blue-500 text-white' : 'bg-muted/50 hover:bg-muted'"
-                      @click="store.setImageModelConfig(store.selectedImageModel, field.key, option.value)"
+                      :class="currentImageConfig[field.key] === option.value ? 'image-option-button--selected' : 'bg-muted/50 hover:bg-muted'"
+                      @click="store.setImageModelConfig(selectedVisibleImageModelId, field.key, option.value)"
                     >
                       {{ option.label }}
                     </button>
@@ -2713,7 +2764,7 @@ onBeforeUnmount(() => {
 
                 <div class="flex-1 space-y-2">
                   <div class="text-xs text-muted-foreground">提示词</div>
-                  <div class="rounded-md border border-input bg-transparent shadow-sm focus-within:ring-1 focus-within:ring-ring">
+                  <div class="prompt-editor rounded-md border border-input bg-transparent shadow-sm focus-within:ring-1 focus-within:ring-ring">
                     <div
                       class="relative"
                       :style="{ '--prompt-system-offset': promptSystemInlineOffset }"
@@ -2935,7 +2986,7 @@ onBeforeUnmount(() => {
 
                 <button
                   type="button"
-                  class="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-primary px-8 text-sm font-semibold text-primary-foreground shadow transition-colors hover:bg-primary/90"
+                  class="primary-action inline-flex h-10 w-full items-center justify-center gap-2 rounded-md px-8 text-sm font-semibold transition-colors disabled:cursor-not-allowed"
                   :class="store.isGenerating ? 'opacity-80' : ''"
                   :disabled="!canGenerateImage"
                   @click="handleGenerateImage"
@@ -2954,9 +3005,9 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="rounded-xl border bg-card text-card-foreground shadow h-fit">
+          <section class="app-panel rounded-xl border bg-card text-card-foreground shadow h-fit">
             <div class="flex flex-col space-y-1.5 p-6 pb-3">
-              <h3 class="text-base font-semibold tracking-tight">生成结果</h3>
+              <h3 class="panel-title text-base font-semibold">生成结果</h3>
             </div>
             <div class="p-6 pt-0">
               <div class="flex h-full flex-col space-y-4">
@@ -3081,10 +3132,10 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else>
-        <div class="grid gap-6 lg:grid-cols-[280px_1fr_320px]">
-          <section class="rounded-xl border bg-card text-card-foreground shadow h-fit">
+        <div class="workspace-grid grid gap-6 lg:grid-cols-[280px_1fr_320px]">
+          <section class="app-panel rounded-xl border bg-card text-card-foreground shadow h-fit">
             <div class="flex flex-col space-y-1.5 p-6 pb-3">
-              <h3 class="text-base font-semibold tracking-tight">视频 & 模型</h3>
+              <h3 class="panel-title text-base font-semibold">视频 & 模型</h3>
             </div>
 
             <div class="space-y-6 p-6 pt-0">
@@ -3165,7 +3216,7 @@ onBeforeUnmount(() => {
                     <button
                       type="button"
                       class="relative inline-flex h-4 w-8 shrink-0 rounded-full p-0.5 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      :class="videoFirstLastEnabled ? 'bg-blue-500' : 'bg-muted'"
+                      :class="videoFirstLastEnabled ? 'video-toggle--active' : 'bg-muted'"
                       role="switch"
                       :aria-checked="videoFirstLastEnabled"
                       aria-label="切换首尾帧模式"
@@ -3307,9 +3358,9 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="rounded-xl border bg-card text-card-foreground shadow">
+          <section class="app-panel rounded-xl border bg-card text-card-foreground shadow">
             <div class="flex flex-col space-y-1.5 p-6 pb-3">
-              <h3 class="text-base font-semibold tracking-tight">参数设置</h3>
+              <h3 class="panel-title text-base font-semibold">参数设置</h3>
             </div>
 
             <div class="space-y-4 p-6 pt-0">
@@ -3337,7 +3388,7 @@ onBeforeUnmount(() => {
                         :class="[
                           'flex h-10 flex-col items-center justify-center rounded-md transition-all',
                           currentVideoConfig[field.key] === option.value
-                            ? 'bg-blue-500 text-white'
+                            ? 'choice-option--selected'
                             : 'bg-muted/50 text-muted-foreground hover:bg-muted',
                         ]"
                         :style="field.buttonWidthPx ? { width: `${field.buttonWidthPx}px`, minWidth: `${field.buttonWidthPx}px` } : undefined"
@@ -3361,7 +3412,7 @@ onBeforeUnmount(() => {
                       :class="[
                         'h-10 rounded-lg py-2.5 text-sm font-medium transition-all',
                         currentVideoConfig[field.key] === option.value
-                          ? 'bg-blue-500 text-white'
+                          ? 'choice-option--selected'
                           : 'bg-muted/50 text-muted-foreground hover:bg-muted',
                       ]"
                       :style="field.buttonWidthPx ? { width: `${field.buttonWidthPx}px`, minWidth: `${field.buttonWidthPx}px` } : undefined"
@@ -3383,7 +3434,7 @@ onBeforeUnmount(() => {
                   <textarea
                     v-else
                     :value="String(currentVideoConfig[field.key] || '')"
-                    class="min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    class="prompt-editor min-h-[120px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     :placeholder="field.placeholder"
                     @input="store.setVideoField(field.key, ($event.target as HTMLTextAreaElement).value)"
                   />
@@ -3392,8 +3443,8 @@ onBeforeUnmount(() => {
 
               <button
                 type="button"
-                class="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-primary px-8 text-sm font-semibold text-primary-foreground shadow transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-primary disabled:text-primary-foreground"
-                :disabled="isVideoGenerating"
+                class="primary-action inline-flex h-10 w-full items-center justify-center gap-2 rounded-md px-8 text-sm font-semibold transition-colors disabled:cursor-not-allowed"
+                :disabled="!canGenerateVideo"
                 @click="handleSubmitVideo"
               >
                 <LoaderCircle
@@ -3409,9 +3460,9 @@ onBeforeUnmount(() => {
             </div>
           </section>
 
-          <section class="rounded-xl border bg-card text-card-foreground shadow h-fit">
+          <section class="app-panel rounded-xl border bg-card text-card-foreground shadow h-fit">
             <div class="flex flex-col space-y-1.5 p-6 pb-3">
-              <h3 class="text-base font-semibold tracking-tight">生成结果</h3>
+              <h3 class="panel-title text-base font-semibold">生成结果</h3>
             </div>
             <div class="p-6 pt-0">
               <div
@@ -3499,14 +3550,21 @@ onBeforeUnmount(() => {
 
       <div
         v-if="visibleHistory.length > 0"
-        class="mt-6 border-t pt-6"
+        class="history-dock mt-6 border-t pt-6"
       >
-        <div class="columns-2 gap-3 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 2xl:columns-7">
+        <div class="history-masonry columns-2 gap-3 sm:columns-3 md:columns-4 lg:columns-5 xl:columns-6 2xl:columns-7">
           <article
             v-for="task in visibleHistory"
             :key="getGalleryHistoryKey(task)"
-            class="group relative mb-4 break-inside-avoid rounded-lg transition-all hover:shadow-md"
-            :class="task.kind === 'image' && task.resultImages.length > 1 ? 'overflow-visible' : 'overflow-hidden border bg-card'"
+            class="history-card group relative mb-4 break-inside-avoid rounded-lg transition-all hover:shadow-md"
+            :class="[
+              task.kind === 'video'
+                ? 'overflow-hidden border bg-card'
+                : task.resultImages.length > 1
+                  ? 'overflow-visible'
+                  : 'overflow-hidden',
+              task.kind === 'video' ? 'history-card--video' : 'history-card--image',
+            ]"
           >
             <div
               class="cursor-pointer"
@@ -3529,11 +3587,12 @@ onBeforeUnmount(() => {
                     class="history-stack-image"
                     :style="getHistoryImageStackStyle(index)"
                     @load="index === 0 ? setHistoryImageResolutionLabel(task, $event) : undefined"
+                    @error="markHistoryImageBroken(task, image, index)"
                   />
                   <div class="history-stack-actions">
                     <button
                       type="button"
-                      class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                      class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
                       title="加载配置"
                       @click.stop="loadGalleryItemConfig(task)"
                     >
@@ -3541,7 +3600,7 @@ onBeforeUnmount(() => {
                     </button>
                     <button
                       type="button"
-                      class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                      class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
                       title="下载"
                       @click.stop="downloadImageSet(task.resultImages)"
                     >
@@ -3549,7 +3608,7 @@ onBeforeUnmount(() => {
                     </button>
                     <button
                       type="button"
-                      class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                      class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
                       title="删除"
                       @click.stop="removeGalleryItem(task)"
                     >
@@ -3561,8 +3620,9 @@ onBeforeUnmount(() => {
                   v-else
                   :src="getHistoryImagePreview(task)"
                   alt=""
-                  class="w-full transition-opacity hover:opacity-90"
+                  class="history-single-image w-full transition-opacity hover:opacity-90"
                   @load="setHistoryImageResolutionLabel(task, $event)"
+                  @error="markHistoryImageBroken(task, getHistoryImagePreview(task), 0)"
                 />
               </div>
               <video
@@ -3571,7 +3631,7 @@ onBeforeUnmount(() => {
                 muted
                 playsinline
                 preload="metadata"
-                class="w-full bg-black transition-opacity hover:opacity-90"
+                class="history-video w-full bg-black transition-opacity hover:opacity-90"
                 @loadedmetadata="setHistoryVideoDurationLabel(task, $event)"
               />
               <template v-if="task.kind === 'video'">
@@ -3591,20 +3651,20 @@ onBeforeUnmount(() => {
               v-if="task.kind === 'image' && task.resultImages.length > 1"
               class="pointer-events-none flex max-w-full flex-wrap items-start gap-1 px-1 pb-1 pt-0.5"
             >
-              <span class="inline-flex items-center gap-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">
+              <span class="history-badge inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]">
                 <ImageIcon class="h-3 w-3" />
                 {{ getHistoryImageCountLabel(task) }}
               </span>
-              <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
-                {{ IMAGE_MODELS.find((model) => model.id === task.model)?.name || task.model }}
+              <span class="history-badge rounded px-1.5 py-0.5 text-[10px]">
+                {{ getImageModelDisplayName(task.model) }}
               </span>
               <span
                 v-if="formatImageResolutionLabel(task)"
-                class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white"
+                class="history-badge rounded px-1.5 py-0.5 text-[10px]"
               >
                 {{ formatImageResolutionLabel(task) }}
               </span>
-              <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
+              <span class="history-badge rounded px-1.5 py-0.5 text-[10px]">
                 {{ formatElapsed(task.generationTime) }}
               </span>
             </div>
@@ -3637,7 +3697,7 @@ onBeforeUnmount(() => {
                 <span class="rounded bg-black/60 px-1.5 py-0.5 text-[10px] text-white">
                   {{
                     task.kind === 'image'
-                      ? IMAGE_MODELS.find((model) => model.id === task.model)?.name || task.model
+                      ? getImageModelDisplayName(task.model)
                       : task.modelTitle
                   }}
                 </span>
@@ -3657,7 +3717,7 @@ onBeforeUnmount(() => {
             >
               <button
                 type="button"
-                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
                 title="加载配置"
                 @click.stop="loadGalleryItemConfig(task)"
               >
@@ -3666,7 +3726,7 @@ onBeforeUnmount(() => {
               <button
                 v-if="task.kind === 'image'"
                 type="button"
-                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
                 title="继续编辑"
                 @click.stop="store.continueWithResult(getHistoryImagePreview(task))"
               >
@@ -3675,7 +3735,7 @@ onBeforeUnmount(() => {
               <button
                 v-if="task.kind === 'image'"
                 type="button"
-                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
                 title="下载"
                 @click.stop="downloadImage(getHistoryImagePreview(task), 0)"
               >
@@ -3684,7 +3744,7 @@ onBeforeUnmount(() => {
               <button
                 v-if="task.kind === 'video' && shouldShowVeoExtendButton(task)"
                 type="button"
-                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-50"
+                class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                 :disabled="Boolean(getVeoExtendDisabledReason(task))"
                 :title="getVeoExtendDisabledReason(task) || '延长 7 秒'"
                 @click.stop="handleExtendVeoVideo(task)"
@@ -3694,7 +3754,7 @@ onBeforeUnmount(() => {
               <button
                 v-if="task.kind === 'video'"
                 type="button"
-                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
                 title="下载"
                 @click.stop="downloadVideo(task)"
               >
@@ -3702,7 +3762,7 @@ onBeforeUnmount(() => {
               </button>
               <button
                 type="button"
-                class="pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                class="history-action-button pointer-events-auto inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors"
                 title="删除"
                 @click.stop="removeGalleryItem(task)"
               >
@@ -3837,6 +3897,7 @@ onBeforeUnmount(() => {
           <MultiAngleThreePreview
             v-model="viewRotationDraft"
             :image-url="viewRotationReferenceImage"
+            :theme-mode="store.themeMode"
           />
         </div>
 
@@ -3915,32 +3976,203 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.app-shell {
+  min-height: 100vh;
+  background: hsl(var(--background));
+  letter-spacing: 0;
+}
+
+.dark .app-shell {
+  background-color: hsl(var(--background));
+  background-image: none;
+}
+
+.app-header {
+  border-color: hsl(var(--border));
+  background: hsl(var(--background) / 0.96);
+  box-shadow: none;
+}
+
+.brand-title {
+  color: hsl(var(--foreground));
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.workspace-main {
+  width: min(1520px, calc(100vw - 3rem));
+  max-width: none;
+  padding-top: 1.5rem;
+}
+
+.workspace-mode-row {
+  justify-content: center;
+}
+
+.workspace-grid {
+  align-items: start;
+}
+
+@media (min-width: 1024px) {
+  .workspace-grid {
+    grid-template-columns: minmax(17rem, 19rem) minmax(30rem, 1fr) minmax(20rem, 23rem);
+    gap: 1rem;
+  }
+}
+
+.header-icon-button {
+  position: relative;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+}
+
+.header-icon-button::before {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: hsl(var(--accent));
+  content: "";
+  opacity: 0;
+  transition: opacity 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.header-icon-button:hover::before,
+.header-icon-button:focus-visible::before {
+  opacity: 1;
+}
+
+.header-icon-button > * {
+  position: relative;
+  z-index: 1;
+}
+
+.app-panel {
+  overflow: hidden;
+  border-color: hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--card));
+  box-shadow: var(--surface-shadow);
+}
+
+.dark .app-panel {
+  background: hsl(var(--card));
+}
+
+.panel-title {
+  color: hsl(var(--foreground));
+  letter-spacing: 0;
+}
+
+.app-shell .bg-primary {
+  border-color: transparent;
+  background: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+  box-shadow: none;
+}
+
+.app-shell .app-panel .bg-primary:not(.primary-action) {
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+}
+
+.app-shell .app-panel .bg-primary:not(.primary-action):hover {
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+}
+
+.app-shell .bg-primary:hover {
+  filter: none;
+}
+
+.primary-action {
+  position: relative;
+  overflow: hidden;
+  min-height: 2.75rem;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--accent));
+  color: hsl(var(--foreground));
+  box-shadow: none;
+}
+
+.primary-action:hover,
+.primary-action:focus-visible {
+  background: hsl(var(--selection));
+  color: hsl(var(--foreground));
+  filter: none;
+}
+
+.primary-action::after {
+  position: absolute;
+  inset: 0;
+  background: hsl(var(--foreground) / 0.03);
+  content: "";
+  opacity: 0;
+  transition:
+    opacity 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.primary-action:hover::after,
+.primary-action:focus-visible::after {
+  opacity: 1;
+}
+
+.primary-action:disabled {
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+  box-shadow: none;
+  filter: none;
+}
+
+.primary-action:disabled::after {
+  display: none;
+}
+
+.brand-mark {
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: 0 0 auto;
+  background: hsl(var(--foreground));
+  mask: url("/favicon.svg") center / contain no-repeat;
+  -webkit-mask: url("/favicon.svg") center / contain no-repeat;
+  opacity: 0.9;
+  transition:
+    background-color 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    opacity 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.brand-mark:hover {
+  opacity: 1;
+}
+
 .mode-switch {
   position: relative;
   display: inline-grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.125rem;
+  gap: 0.25rem;
   width: 9.5rem;
-  border: 1px solid hsl(var(--input));
-  border-radius: calc(var(--radius) + 2px);
-  background: hsl(var(--background));
-  padding: 0.125rem;
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.05);
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--card));
+  padding: 0.25rem;
+  box-shadow: none;
 }
 
 .mode-switch-thumb {
   position: absolute;
-  inset: 0.125rem auto 0.125rem 0.125rem;
-  width: calc(50% - 0.1875rem);
-  border-radius: calc(var(--radius) - 1px);
-  background: hsl(var(--primary));
-  box-shadow: 0 1px 3px rgb(0 0 0 / 0.14);
+  inset: 0.25rem auto 0.25rem 0.25rem;
+  width: calc(50% - 0.375rem);
+  border-radius: calc(var(--radius) - 2px);
+  border: 1px solid hsl(var(--border) / 0.72);
+  background: hsl(var(--selection));
+  box-shadow: none;
   transform: translateX(0);
   transition: transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .mode-switch[data-mode="video"] .mode-switch-thumb {
-  transform: translateX(calc(100% + 0.125rem));
+  transform: translateX(calc(100% + 0.5rem));
 }
 
 .mode-switch-button {
@@ -3951,10 +4183,10 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 0.375rem;
-  border-radius: calc(var(--radius) - 1px);
+  border-radius: calc(var(--radius) - 2px);
   padding: 0 0.5rem;
   font-size: 0.875rem;
-  font-weight: 500;
+  font-weight: 600;
   line-height: 1.25rem;
   transition:
     color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
@@ -3992,11 +4224,56 @@ onBeforeUnmount(() => {
 
 .image-option-button {
   min-width: 0;
+  border: 1px solid hsl(var(--border) / 0.16);
   border-radius: calc(var(--radius) - 2px);
   font-weight: 500;
+  color: hsl(var(--foreground));
   transition-property: color, background-color, border-color, text-decoration-color, fill, stroke;
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   transition-duration: 150ms;
+}
+
+.image-option-button--selected {
+  border-color: hsl(var(--selection));
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+  box-shadow: none;
+}
+
+.image-option-button--selected:hover {
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+}
+
+.choice-option--selected {
+  border: 1px solid hsl(var(--selection));
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+  box-shadow: none;
+}
+
+.choice-option--selected:hover {
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+}
+
+.video-toggle--active {
+  background: hsl(var(--selection));
+}
+
+.status-badge--info {
+  background: hsl(var(--info) / 0.12);
+  color: hsl(var(--info));
+}
+
+.status-badge--success {
+  background: hsl(var(--success) / 0.12);
+  color: hsl(var(--success));
+}
+
+.status-badge--error {
+  background: hsl(var(--error) / 0.12);
+  color: hsl(var(--error));
 }
 
 .image-option-button--preview {
@@ -4033,6 +4310,60 @@ onBeforeUnmount(() => {
   width: 100%;
   aspect-ratio: 16 / 9;
   min-height: 0;
+  border-color: hsl(var(--border) / 0.74);
+  background: hsl(var(--preview-background));
+}
+
+.app-shell .border-dashed {
+  border-color: hsl(var(--border));
+}
+
+.history-dock {
+  border-color: hsl(var(--border));
+}
+
+.history-masonry {
+  line-height: 1;
+}
+
+.history-card {
+  border-color: hsl(var(--border));
+  background: transparent;
+  box-shadow: none;
+}
+
+.history-card img {
+  display: block;
+}
+
+.history-card--image:not(.overflow-visible) {
+  background: hsl(var(--card));
+}
+
+.history-single-image {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--card));
+  box-sizing: border-box;
+  object-fit: cover;
+}
+
+.history-card--video {
+  min-height: 8rem;
+  background: hsl(0 0% 10%);
+}
+
+.history-video {
+  display: block;
+  width: 100%;
+  min-height: 8rem;
+  aspect-ratio: 16 / 9;
+  background: hsl(0 0% 10%);
+  object-fit: cover;
+}
+
+.history-card--video .pointer-events-none.absolute.inset-0 {
+  color: white;
 }
 
 .image-result-loading-animation {
@@ -4074,19 +4405,35 @@ onBeforeUnmount(() => {
 .history-stack-image {
   position: absolute;
   inset: 0;
+  display: block;
   height: 100%;
   width: 100%;
   border: 1px solid hsl(var(--border));
-  border-radius: 0.5rem;
+  border-radius: var(--radius);
   background: hsl(var(--card));
   object-fit: cover;
-  box-shadow: 0 2px 4px rgb(0 0 0 / 0.24);
+  box-shadow: 0 10px 28px hsl(216 16% 3% / 0.16);
   transform-origin: 50% 8%;
   transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .history-stack-image:hover {
   opacity: 0.9;
+}
+
+.history-badge {
+  position: relative;
+  z-index: 20;
+  background: hsl(0 0% 0% / 0.78);
+  color: white;
+  font-weight: 600;
+  line-height: 1.1;
+  box-shadow: 0 1px 2px hsl(0 0% 0% / 0.22);
+}
+
+.history-badge svg {
+  color: currentColor;
+  stroke-width: 2.25;
 }
 
 .history-stack-actions {
@@ -4106,6 +4453,35 @@ onBeforeUnmount(() => {
   opacity: 1;
 }
 
+.history-action-button {
+  border: 1px solid hsl(0 0% 0% / 0.1);
+  background: hsl(0 0% 100% / 0.9);
+  color: hsl(0 0% 12%);
+  box-shadow: 0 6px 18px hsl(0 0% 0% / 0.14);
+  backdrop-filter: blur(10px);
+}
+
+.history-action-button:hover,
+.history-action-button:focus-visible {
+  border-color: hsl(0 0% 0% / 0.18);
+  background: hsl(0 0% 100% / 0.98);
+  color: hsl(0 0% 0%);
+}
+
+.dark .history-action-button {
+  border-color: hsl(0 0% 100% / 0.14);
+  background: hsl(0 0% 12% / 0.86);
+  color: hsl(0 0% 96%);
+  box-shadow: 0 8px 22px hsl(0 0% 0% / 0.28);
+}
+
+.dark .history-action-button:hover,
+.dark .history-action-button:focus-visible {
+  border-color: hsl(0 0% 100% / 0.24);
+  background: hsl(0 0% 18% / 0.96);
+  color: hsl(0 0% 100%);
+}
+
 .prompt-system-indicator {
   position: absolute;
   left: 0.75rem;
@@ -4121,10 +4497,10 @@ onBeforeUnmount(() => {
 .prompt-system-chain {
   display: inline-flex;
   align-items: center;
-  border: 1px solid rgb(52 211 153 / 0.66);
+  border: 1px solid hsl(var(--system) / 0.66);
   border-radius: calc(var(--radius) - 2px);
-  background: rgb(16 185 129 / 0.12);
-  box-shadow: inset 0 0 0 1px rgb(16 185 129 / 0.04);
+  background: hsl(var(--system) / 0.1);
+  box-shadow: none;
   transition:
     background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
     border-color 150ms cubic-bezier(0.4, 0, 0.2, 1);
@@ -4132,8 +4508,8 @@ onBeforeUnmount(() => {
 
 .prompt-system-chain:hover,
 .prompt-system-chain:focus-within {
-  border-color: rgb(110 231 183);
-  background: rgb(16 185 129 / 0.18);
+  border-color: hsl(var(--system) / 0.86);
+  background: hsl(var(--system) / 0.14);
 }
 
 .prompt-system-token-wrap,
@@ -4147,7 +4523,7 @@ onBeforeUnmount(() => {
   align-items: center;
   border: 0;
   background: transparent;
-  color: rgb(52 211 153);
+  color: hsl(var(--system));
 }
 
 .prompt-system-token {
@@ -4155,7 +4531,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 0.375rem;
   padding: 0.25rem 0.5rem;
-  color: rgb(52 211 153);
+  color: hsl(var(--system));
   font-size: 0.75rem;
   line-height: 1rem;
 }
@@ -4167,7 +4543,7 @@ onBeforeUnmount(() => {
 
 .prompt-system-token--camera,
 .prompt-system-token--view {
-  color: rgb(52 211 153);
+  color: hsl(var(--system));
 }
 
 .prompt-system-popover {
@@ -4206,10 +4582,10 @@ onBeforeUnmount(() => {
   align-items: center;
   height: 1.625rem;
   border: 0;
-  border-left: 1px solid rgb(52 211 153 / 0.34);
+  border-left: 1px solid hsl(var(--system) / 0.34);
   background: transparent;
   padding: 0 0.5rem;
-  color: rgb(52 211 153);
+  color: hsl(var(--system));
   font-size: 0.75rem;
   line-height: 1rem;
 }
@@ -4220,7 +4596,7 @@ onBeforeUnmount(() => {
 
 .prompt-reference-token:hover,
 .prompt-reference-token:focus-visible {
-  background: rgb(16 185 129 / 0.16);
+  background: hsl(var(--system) / 0.16);
 }
 
 .prompt-reference-popover {
@@ -4289,6 +4665,16 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+.prompt-editor {
+  border-color: hsl(var(--input) / 0.82);
+  background: hsl(var(--card));
+  box-shadow: none;
+}
+
+.prompt-editor:focus-within {
+  border-color: hsl(var(--muted-foreground) / 0.45);
+}
+
 .prompt-tools-group {
   display: flex;
   flex-wrap: wrap;
@@ -4301,9 +4687,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 0.375rem;
-  border: 1px solid hsl(var(--border) / 0.12);
+  border: 1px solid hsl(var(--border) / 0.36);
   border-radius: calc(var(--radius) - 2px);
-  background: hsl(var(--background) / 0.2);
+  background: hsl(var(--muted) / 0.5);
   padding: 0.375rem 0.625rem;
   color: hsl(var(--muted-foreground));
   font-size: 0.75rem;
@@ -4326,8 +4712,8 @@ onBeforeUnmount(() => {
 
 .prompt-tool-button:hover,
 .prompt-tool-button:focus-visible {
-  border-color: hsl(var(--border) / 0.45);
-  background: hsl(var(--background) / 0.72);
+  border-color: hsl(var(--border) / 0.82);
+  background: hsl(var(--accent));
   color: hsl(var(--foreground));
   opacity: 1;
 }
@@ -4362,17 +4748,18 @@ onBeforeUnmount(() => {
 }
 
 .prompt-tool-button--selected {
-  border-color: rgb(96 165 250);
-  background: rgb(59 130 246);
-  color: white;
+  border-color: hsl(var(--selection));
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+  box-shadow: none;
   opacity: 1;
 }
 
 .prompt-tool-button--selected:hover,
 .prompt-tool-button--selected:focus-visible {
-  border-color: rgb(147 197 253);
-  background: rgb(59 130 246);
-  color: white;
+  border-color: hsl(var(--selection));
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
   opacity: 1;
 }
 
@@ -4381,10 +4768,10 @@ onBeforeUnmount(() => {
   max-height: min(88dvh, 45rem);
   overflow-y: auto;
   border: 1px solid hsl(var(--border));
-  border-radius: 0.875rem;
+  border-radius: var(--radius);
   background: hsl(var(--card));
   color: hsl(var(--card-foreground));
-  box-shadow: 0 30px 80px rgb(0 0 0 / 0.45);
+  box-shadow: var(--surface-shadow);
 }
 
 .view-rotation-header {
@@ -4419,8 +4806,8 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.25rem;
   margin: 0 1rem 0.875rem;
-  border-radius: calc(var(--radius) + 2px);
-  background: hsl(var(--muted) / 0.42);
+  border-radius: var(--radius);
+  background: hsl(var(--muted) / 0.7);
   padding: 0.25rem;
 }
 
@@ -4442,28 +4829,29 @@ onBeforeUnmount(() => {
 }
 
 .view-rotation-tab--active {
-  background: hsl(var(--background));
+  background: hsl(var(--card));
   color: hsl(var(--foreground));
-  box-shadow: 0 8px 20px rgb(0 0 0 / 0.18);
+  box-shadow: none;
 }
 
 .view-rotation-preview-wrap {
   margin: 0 1rem;
-  border: 1px solid rgb(30 41 59);
-  border-radius: calc(var(--radius) + 4px);
-  background: rgb(7 12 22);
+  border: 1px solid hsl(var(--preview-border));
+  border-radius: var(--radius);
+  background: hsl(var(--preview-background));
   padding: 0.5rem;
+  box-shadow: none;
 }
 
 .view-rotation-readout {
   width: 100%;
   height: 1.875rem;
-  border: 1px solid rgb(51 65 85);
+  border: 1px solid hsl(var(--preview-border));
   border-radius: calc(var(--radius) - 2px);
-  background: rgb(12 18 31);
+  background: hsl(var(--preview-background));
   padding: 0 0.625rem;
   text-align: center;
-  color: rgb(226 232 240);
+  color: hsl(var(--preview-foreground));
   font-size: 0.75rem;
   line-height: 1rem;
   outline: none;
@@ -4509,8 +4897,10 @@ onBeforeUnmount(() => {
   margin-top: -0.34375rem;
   appearance: none;
   border-radius: 9999px;
-  background: hsl(var(--foreground));
-  box-shadow: 0 0 0 3px hsl(var(--background));
+  background: hsl(var(--selection));
+  box-shadow:
+    0 0 0 3px hsl(var(--background)),
+    0 0 0 1px hsl(var(--border));
 }
 
 .view-rotation-slider input::-moz-range-track {
@@ -4524,8 +4914,10 @@ onBeforeUnmount(() => {
   height: 0.875rem;
   border: 0;
   border-radius: 9999px;
-  background: hsl(var(--foreground));
-  box-shadow: 0 0 0 3px hsl(var(--background));
+  background: hsl(var(--selection));
+  box-shadow:
+    0 0 0 3px hsl(var(--background)),
+    0 0 0 1px hsl(var(--border));
 }
 
 .view-rotation-actions {
@@ -4562,13 +4954,14 @@ onBeforeUnmount(() => {
 }
 
 .view-rotation-primary {
-  background: hsl(var(--foreground));
-  color: hsl(var(--background));
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+  box-shadow: none;
 }
 
 .view-rotation-primary:hover,
 .view-rotation-primary:focus-visible {
-  background: hsl(var(--foreground) / 0.88);
+  filter: brightness(1.04) saturate(1.06);
   outline: none;
 }
 
@@ -4577,10 +4970,10 @@ onBeforeUnmount(() => {
   max-height: min(82vh, 42rem);
   overflow: hidden;
   border: 1px solid hsl(var(--border));
-  border-radius: 1rem;
+  border-radius: var(--radius);
   background: hsl(var(--card));
   color: hsl(var(--card-foreground));
-  box-shadow: 0 30px 80px rgb(0 0 0 / 0.45);
+  box-shadow: var(--surface-shadow);
 }
 
 .camera-parameter-header {
@@ -4641,8 +5034,8 @@ onBeforeUnmount(() => {
   height: var(--camera-wheel-height);
   overflow: hidden;
   border: 1px solid hsl(var(--border));
-  border-radius: calc(var(--radius) + 2px);
-  background: hsl(var(--muted) / 0.32);
+  border-radius: var(--radius);
+  background: hsl(var(--muted) / 0.48);
 }
 
 .camera-parameter-selection {
@@ -4653,12 +5046,12 @@ onBeforeUnmount(() => {
   top: 50%;
   z-index: 4;
   height: var(--camera-option-height);
-  border: 1px solid rgb(96 165 250 / 0.28);
+  border: 1px solid hsl(var(--selection) / 0.32);
   border-radius: calc(var(--radius) - 2px);
-  background: rgb(59 130 246 / 0.1);
+  background: hsl(var(--selection) / 0.08);
   box-shadow:
-    0 -1px 0 rgb(96 165 250 / 0.32),
-    0 1px 0 rgb(96 165 250 / 0.32);
+    0 -1px 0 hsl(var(--selection) / 0.2),
+    0 1px 0 hsl(var(--selection) / 0.2);
   transform: translateY(-50%);
 }
 
@@ -4707,7 +5100,7 @@ onBeforeUnmount(() => {
 }
 
 .camera-parameter-option--active {
-  color: rgb(96 165 250);
+  color: hsl(var(--foreground));
   font-weight: 600;
 }
 
@@ -4748,14 +5141,14 @@ onBeforeUnmount(() => {
 }
 
 .camera-parameter-primary {
-  background: rgb(59 130 246);
-  color: white;
-  box-shadow: 0 10px 24px rgb(59 130 246 / 0.28);
+  background: hsl(var(--selection));
+  color: hsl(var(--selection-foreground));
+  box-shadow: none;
 }
 
 .camera-parameter-primary:hover,
 .camera-parameter-primary:focus-visible {
-  background: rgb(37 99 235);
+  filter: brightness(1.04) saturate(1.06);
   outline: none;
 }
 
@@ -4774,7 +5167,7 @@ onBeforeUnmount(() => {
 
   44% {
     color: hsl(var(--foreground));
-    text-shadow: 0 0 0.7em hsl(var(--primary) / 0.65);
+    text-shadow: 0 0 0.7em hsl(var(--foreground) / 0.22);
   }
 }
 

@@ -139,7 +139,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   },
   {
     id: "qwen-image-edit-multiple-angles",
-    name: "Qwen 多角度",
+    name: "多角度",
     description: "WaveSpeed 多角度图像编辑模型",
     options: [
       {

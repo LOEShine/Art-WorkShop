@@ -18,11 +18,40 @@ interface MultiAngleValue {
   zoom: number;
 }
 
+type ThemeMode = "light" | "dark";
 type DragTarget = "azimuth" | "elevation" | "distance" | null;
+
+interface PreviewTheme {
+  background: number;
+  gridMajor: number;
+  gridMinor: number;
+  subjectFace: number;
+  subjectSide: number;
+  subjectFrame: number;
+  focus: number;
+  elevation: number;
+  distance: number;
+  azimuthHandle: number;
+  elevationHandle: number;
+  distanceHandle: number;
+  cameraBody: number;
+  cameraDetail: number;
+  cameraGlass: number;
+  cameraRim: number;
+  ambient: number;
+  key: number;
+  fill: number;
+  rim: number;
+  placeholderBg: string;
+  placeholderBorder: string;
+  placeholderInk: string;
+  placeholderText: string;
+}
 
 const props = defineProps<{
   modelValue: MultiAngleValue;
   imageUrl?: string;
+  themeMode?: ThemeMode;
 }>();
 
 const emit = defineEmits<{
@@ -36,12 +65,16 @@ function emitValue(value: MultiAngleValue) {
   emit("update:modelValue", value);
 }
 
+function resolveThemeMode(): ThemeMode {
+  return props.themeMode || (document.documentElement.classList.contains("dark") ? "dark" : "light");
+}
+
 onMounted(() => {
   if (!containerRef.value) {
     return;
   }
 
-  widget = new MultiAngleThreeWidget(containerRef.value, emitValue);
+  widget = new MultiAngleThreeWidget(containerRef.value, emitValue, resolveThemeMode());
   widget.setState(props.modelValue);
   widget.updateImage(props.imageUrl || null);
 });
@@ -61,10 +94,72 @@ watch(
   },
 );
 
+watch(
+  () => props.themeMode,
+  () => {
+    widget?.setTheme(resolveThemeMode());
+  },
+);
+
 onBeforeUnmount(() => {
   widget?.dispose();
   widget = null;
 });
+
+const PREVIEW_THEMES = {
+  light: {
+    background: 0xf5f8ff,
+    gridMajor: 0xaebbe0,
+    gridMinor: 0xdfe6f7,
+    subjectFace: 0xffffff,
+    subjectSide: 0xcbd6f4,
+    subjectFrame: 0x3757a6,
+    focus: 0x4c8dff,
+    elevation: 0xa86cff,
+    distance: 0x22c6d9,
+    azimuthHandle: 0x4c8dff,
+    elevationHandle: 0xa86cff,
+    distanceHandle: 0x22c6d9,
+    cameraBody: 0x172033,
+    cameraDetail: 0x2a3858,
+    cameraGlass: 0x4c8dff,
+    cameraRim: 0x0c1220,
+    ambient: 0xe8efff,
+    key: 0xffffff,
+    fill: 0xbfd7ff,
+    rim: 0xe7d6ff,
+    placeholderBg: "#f5f8ff",
+    placeholderBorder: "#aebbe0",
+    placeholderInk: "#3757a6",
+    placeholderText: "#172033",
+  },
+  dark: {
+    background: 0x080d1d,
+    gridMajor: 0x385483,
+    gridMinor: 0x16213d,
+    subjectFace: 0xf2f5f8,
+    subjectSide: 0x18233d,
+    subjectFrame: 0xbfd7ff,
+    focus: 0x74a7ff,
+    elevation: 0xbb86ff,
+    distance: 0x35d2e6,
+    azimuthHandle: 0x74a7ff,
+    elevationHandle: 0xbb86ff,
+    distanceHandle: 0x35d2e6,
+    cameraBody: 0xf0f5ff,
+    cameraDetail: 0xbfd1f3,
+    cameraGlass: 0x74a7ff,
+    cameraRim: 0xffffff,
+    ambient: 0xd7deea,
+    key: 0xffffff,
+    fill: 0x74a7ff,
+    rim: 0xbb86ff,
+    placeholderBg: "#080d1d",
+    placeholderBorder: "#385483",
+    placeholderInk: "#8fb4ff",
+    placeholderText: "#f0f5ff",
+  },
+} satisfies Record<ThemeMode, PreviewTheme>;
 
 class MultiAngleThreeWidget {
   private readonly center = new THREE.Vector3(0, 0.78, 0);
@@ -76,6 +171,7 @@ class MultiAngleThreeWidget {
   private readonly zoomMin = 1;
   private readonly zoomMax = 8;
   private readonly defaultZoom = 5;
+  private readonly gridDivisions = 24;
   private readonly freeViewImageHeightRatio = 0.75;
   private readonly subjectMaxWidth = 1.42;
   private readonly subjectMaxHeight = 1.58;
@@ -84,6 +180,7 @@ class MultiAngleThreeWidget {
   private readonly camera = new THREE.PerspectiveCamera(46, 1, 0.1, 100);
   private readonly povCamera = new THREE.PerspectiveCamera(74, 1, 0.1, 100);
   private activeCamera: THREE.Camera = this.camera;
+  private themeMode: ThemeMode;
   private readonly renderer: THREE.WebGLRenderer;
   private readonly raycaster = new THREE.Raycaster();
   private readonly mouse = new THREE.Vector2();
@@ -113,10 +210,21 @@ class MultiAngleThreeWidget {
     color: 0x162033,
   });
   private readonly subjectMesh: THREE.Mesh;
+  private readonly subjectFrameMaterial = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.72 });
   private readonly subjectFrame: THREE.LineSegments;
   private subjectTexture: THREE.Texture | null = null;
+  private usingPlaceholderTexture = false;
 
   private readonly cameraRig = new THREE.Group();
+  private readonly cameraBodyMaterial = new THREE.MeshBasicMaterial();
+  private readonly cameraDetailMaterial = new THREE.MeshBasicMaterial();
+  private readonly cameraGlassMaterial = new THREE.MeshBasicMaterial();
+  private readonly cameraRimMaterial = new THREE.MeshBasicMaterial();
+  private readonly ambientLight = new THREE.AmbientLight();
+  private readonly keyLight = new THREE.DirectionalLight();
+  private readonly fillLight = new THREE.DirectionalLight();
+  private readonly rimLight = new THREE.DirectionalLight();
+  private readonly grid: THREE.GridHelper;
   private readonly azimuthRing: THREE.Mesh;
   private readonly elevationArc: THREE.Mesh;
   private readonly distanceTube: THREE.Mesh;
@@ -131,9 +239,10 @@ class MultiAngleThreeWidget {
   constructor(
     private readonly container: HTMLElement,
     private readonly onChange: (value: MultiAngleValue) => void,
+    themeMode: ThemeMode,
   ) {
+    this.themeMode = themeMode;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    this.renderer.setClearColor(0x070c16, 1);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.domElement.className = "multi-angle-three-preview__canvas";
@@ -146,27 +255,26 @@ class MultiAngleThreeWidget {
     });
     this.container.appendChild(this.renderer.domElement);
 
-    this.scene.background = new THREE.Color(0x070c16);
     this.camera.position.set(4.1, 3.15, 4.75);
     this.camera.zoom = 1.36;
     this.camera.lookAt(this.center);
     this.camera.updateProjectionMatrix();
 
-    this.scene.add(new THREE.AmbientLight(0xb8c7dd, 0.46));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 0.92);
-    keyLight.position.set(4, 7, 5);
-    this.scene.add(keyLight);
-    const fillLight = new THREE.DirectionalLight(0x7dd3fc, 0.28);
-    fillLight.position.set(-4, 4, -2);
-    this.scene.add(fillLight);
+    this.ambientLight.intensity = 0.54;
+    this.scene.add(this.ambientLight);
+    this.keyLight.intensity = 0.9;
+    this.keyLight.position.set(4, 7, 5);
+    this.scene.add(this.keyLight);
+    this.fillLight.intensity = 0.26;
+    this.fillLight.position.set(-4, 4, -2);
+    this.scene.add(this.fillLight);
+    this.rimLight.intensity = 0.16;
+    this.rimLight.position.set(-5, 5, -5);
+    this.scene.add(this.rimLight);
 
-    const rimLight = new THREE.DirectionalLight(0xf0abfc, 0.16);
-    rimLight.position.set(-5, 5, -5);
-    this.scene.add(rimLight);
-
-    const grid = new THREE.GridHelper(5.4, 24, 0x475569, 0x1e293b);
-    grid.position.y = 0;
-    this.scene.add(grid);
+    this.grid = new THREE.GridHelper(5.4, this.gridDivisions, 0xffffff, 0xffffff);
+    this.grid.position.y = 0;
+    this.scene.add(this.grid);
 
     const subjectGeometry = new THREE.BoxGeometry(1, 1, 0.035);
     this.subjectMesh = new THREE.Mesh(subjectGeometry, [
@@ -183,7 +291,7 @@ class MultiAngleThreeWidget {
 
     this.subjectFrame = new THREE.LineSegments(
       new THREE.EdgesGeometry(subjectGeometry),
-      new THREE.LineBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.72 }),
+      this.subjectFrameMaterial,
     );
     this.subjectFrame.position.copy(this.center);
     this.subjectFrame.scale.copy(this.subjectMesh.scale);
@@ -192,7 +300,6 @@ class MultiAngleThreeWidget {
     this.focusRing = new THREE.Mesh(
       new THREE.RingGeometry(0.55, 0.575, 80),
       new THREE.MeshBasicMaterial({
-        color: 0xff3344,
         transparent: true,
         opacity: 0.36,
         side: THREE.DoubleSide,
@@ -210,16 +317,16 @@ class MultiAngleThreeWidget {
 
     this.distanceTube = new THREE.Mesh(
       new THREE.TubeGeometry(new THREE.LineCurve3(this.center, this.center), 1, 0.022, 8),
-      new THREE.MeshBasicMaterial({ color: 0xf5a400, transparent: true, opacity: 0.86 }),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.86 }),
     );
     this.scene.add(this.distanceTube);
 
-    this.azimuthHandle = this.createHandle(0xff5964);
-    this.elevationHandle = this.createHandle(0x55ff72);
-    this.distanceHandle = this.createHandle(0xffb928);
-    this.azimuthGlow = this.createGlow(0xff5964);
-    this.elevationGlow = this.createGlow(0x55ff72);
-    this.distanceGlow = this.createGlow(0xffb928);
+    this.azimuthHandle = this.createHandle();
+    this.elevationHandle = this.createHandle();
+    this.distanceHandle = this.createHandle();
+    this.azimuthGlow = this.createGlow();
+    this.elevationGlow = this.createGlow();
+    this.distanceGlow = this.createGlow();
     this.scene.add(
       this.azimuthGlow,
       this.elevationGlow,
@@ -236,8 +343,18 @@ class MultiAngleThreeWidget {
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.container);
     this.resize();
+    this.applyTheme();
     this.updateVisuals();
     this.animate();
+  }
+
+  public setTheme(themeMode: ThemeMode): void {
+    if (themeMode === this.themeMode) {
+      return;
+    }
+
+    this.themeMode = themeMode;
+    this.applyTheme();
   }
 
   public setState(next: MultiAngleValue): void {
@@ -258,6 +375,7 @@ class MultiAngleThreeWidget {
     }
 
     if (!url) {
+      this.usingPlaceholderTexture = true;
       this.subjectMaterial.map = this.createPlaceholderTexture();
       this.subjectMaterial.color.set(0xffffff);
       this.subjectMaterial.needsUpdate = true;
@@ -270,6 +388,7 @@ class MultiAngleThreeWidget {
     loader.load(
       url,
       (texture) => {
+        this.usingPlaceholderTexture = false;
         this.subjectTexture = texture;
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.needsUpdate = true;
@@ -287,6 +406,7 @@ class MultiAngleThreeWidget {
       },
       undefined,
       () => {
+        this.usingPlaceholderTexture = true;
         this.subjectMaterial.map = this.createPlaceholderTexture();
         this.subjectMaterial.needsUpdate = true;
         this.setSubjectSize(1.22, 1.56);
@@ -320,11 +440,99 @@ class MultiAngleThreeWidget {
     canvas.remove();
   }
 
+  private get theme() {
+    return PREVIEW_THEMES[this.themeMode];
+  }
+
+  private applyTheme(): void {
+    const theme = this.theme;
+    this.renderer.setClearColor(theme.background, 1);
+    this.scene.background = new THREE.Color(theme.background);
+    this.container.style.backgroundColor = `#${theme.background.toString(16).padStart(6, "0")}`;
+
+    this.subjectMaterial.color.set(this.subjectMaterial.map ? 0xffffff : theme.subjectFace);
+    this.subjectSideMaterial.color.set(theme.subjectSide);
+    this.subjectFrameMaterial.color.set(theme.subjectFrame);
+    this.setBasicMaterialColor(this.focusRing, theme.focus);
+    this.setBasicMaterialColor(this.azimuthRing, theme.focus);
+    this.setBasicMaterialColor(this.elevationArc, theme.elevation);
+    this.setBasicMaterialColor(this.distanceTube, theme.distance);
+    this.setStandardMaterialColor(this.azimuthHandle, theme.azimuthHandle);
+    this.setStandardMaterialColor(this.elevationHandle, theme.elevationHandle);
+    this.setStandardMaterialColor(this.distanceHandle, theme.distanceHandle);
+    this.setBasicMaterialColor(this.azimuthGlow, theme.azimuthHandle);
+    this.setBasicMaterialColor(this.elevationGlow, theme.elevationHandle);
+    this.setBasicMaterialColor(this.distanceGlow, theme.distanceHandle);
+
+    this.cameraBodyMaterial.color.set(theme.cameraBody);
+    this.cameraDetailMaterial.color.set(theme.cameraDetail);
+    this.cameraGlassMaterial.color.set(theme.cameraGlass);
+    this.cameraRimMaterial.color.set(theme.cameraRim);
+    this.ambientLight.color.set(theme.ambient);
+    this.keyLight.color.set(theme.key);
+    this.fillLight.color.set(theme.fill);
+    this.rimLight.color.set(theme.rim);
+    this.applyGridTheme();
+
+    if (this.usingPlaceholderTexture) {
+      this.subjectMaterial.map?.dispose();
+      this.subjectMaterial.map = this.createPlaceholderTexture();
+    }
+    this.subjectMaterial.needsUpdate = true;
+  }
+
+  private applyGridTheme(): void {
+    const material = this.grid.material as THREE.LineBasicMaterial;
+    material.color.set(0xffffff);
+    material.opacity = this.themeMode === "light" ? 0.58 : 0.66;
+    material.transparent = true;
+    material.vertexColors = true;
+    material.needsUpdate = true;
+
+    const colorAttribute = this.grid.geometry.getAttribute("color") as THREE.BufferAttribute | undefined;
+    if (!colorAttribute) {
+      return;
+    }
+
+    const majorColor = new THREE.Color(this.theme.gridMajor);
+    const minorColor = new THREE.Color(this.theme.gridMinor);
+    const centerLineIndex = this.gridDivisions / 2;
+
+    for (let lineIndex = 0; lineIndex <= this.gridDivisions; lineIndex += 1) {
+      const color = lineIndex === centerLineIndex ? majorColor : minorColor;
+      for (let vertexOffset = 0; vertexOffset < 4; vertexOffset += 1) {
+        colorAttribute.setXYZ(
+          lineIndex * 4 + vertexOffset,
+          color.r,
+          color.g,
+          color.b,
+        );
+      }
+    }
+    colorAttribute.needsUpdate = true;
+  }
+
+  private setBasicMaterialColor(mesh: THREE.Mesh, color: number): void {
+    const material = mesh.material;
+    if (material instanceof THREE.MeshBasicMaterial) {
+      material.color.set(color);
+      material.needsUpdate = true;
+    }
+  }
+
+  private setStandardMaterialColor(mesh: THREE.Mesh, color: number): void {
+    const material = mesh.material;
+    if (material instanceof THREE.MeshStandardMaterial) {
+      material.color.set(color);
+      material.emissive.set(color);
+      material.needsUpdate = true;
+    }
+  }
+
   private createAzimuthRing(): THREE.Mesh {
     const ring = new THREE.Mesh(
       new THREE.TorusGeometry(this.azimuthRadius, 0.028, 12, 160),
       new THREE.MeshBasicMaterial({
-        color: 0xff3344,
         transparent: true,
         opacity: 0.9,
       }),
@@ -358,7 +566,6 @@ class MultiAngleThreeWidget {
     return new THREE.Mesh(
       this.createElevationArcGeometry(),
       new THREE.MeshBasicMaterial({
-        color: 0x28ff39,
         transparent: true,
         opacity: 0.94,
       }),
@@ -388,12 +595,10 @@ class MultiAngleThreeWidget {
     this.elevationArc.geometry = this.createElevationArcGeometry();
   }
 
-  private createHandle(color: number): THREE.Mesh {
+  private createHandle(): THREE.Mesh {
     return new THREE.Mesh(
       new THREE.SphereGeometry(0.14, 32, 32),
       new THREE.MeshStandardMaterial({
-        color,
-        emissive: color,
         emissiveIntensity: 0.34,
         metalness: 0.08,
         roughness: 0.44,
@@ -403,11 +608,10 @@ class MultiAngleThreeWidget {
     );
   }
 
-  private createGlow(color: number): THREE.Mesh {
+  private createGlow(): THREE.Mesh {
     return new THREE.Mesh(
       new THREE.SphereGeometry(0.24, 24, 24),
       new THREE.MeshBasicMaterial({
-        color,
         transparent: true,
         opacity: 0.14,
         depthWrite: false,
@@ -416,36 +620,24 @@ class MultiAngleThreeWidget {
   }
 
   private createCameraRig(): void {
-    const bodyMaterial = new THREE.MeshBasicMaterial({
-      color: 0xf1f5f9,
-    });
-    const detailMaterial = new THREE.MeshBasicMaterial({
-      color: 0xcbd5e1,
-    });
-    const glassMaterial = new THREE.MeshBasicMaterial({
-      color: 0x60a5fa,
-    });
-
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.3, 0.28), bodyMaterial);
-    const prism = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.18), detailMaterial);
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.3, 0.28), this.cameraBodyMaterial);
+    const prism = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.12, 0.18), this.cameraDetailMaterial);
     prism.position.set(-0.08, 0.22, 0);
 
-    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.25, 0.24), detailMaterial);
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.25, 0.24), this.cameraDetailMaterial);
     grip.position.set(0.27, -0.02, 0.02);
 
-    const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 0.22, 32), glassMaterial);
+    const lens = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 0.22, 32), this.cameraGlassMaterial);
     lens.rotation.x = Math.PI / 2;
     lens.position.set(0, 0, -0.24);
 
     const lensRim = new THREE.Mesh(
       new THREE.TorusGeometry(0.16, 0.018, 8, 32),
-      new THREE.MeshBasicMaterial({
-        color: 0xf8fafc,
-      }),
+      this.cameraRimMaterial,
     );
     lensRim.position.set(0, 0, -0.36);
 
-    const strap = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.035, 0.035), detailMaterial);
+    const strap = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.035, 0.035), this.cameraDetailMaterial);
     strap.position.set(0, -0.2, 0.02);
 
     this.cameraRig.add(body, prism, grip, lens, lensRim, strap);
@@ -732,17 +924,18 @@ class MultiAngleThreeWidget {
   };
 
   private createPlaceholderTexture(): THREE.CanvasTexture {
+    const theme = this.theme;
     const canvas = document.createElement("canvas");
     canvas.width = 512;
     canvas.height = 640;
     const context = canvas.getContext("2d");
     if (context) {
-      context.fillStyle = "#101827";
+      context.fillStyle = theme.placeholderBg;
       context.fillRect(0, 0, canvas.width, canvas.height);
-      context.strokeStyle = "#475569";
+      context.strokeStyle = theme.placeholderBorder;
       context.lineWidth = 10;
       context.strokeRect(36, 36, canvas.width - 72, canvas.height - 72);
-      context.strokeStyle = "#94a3b8";
+      context.strokeStyle = theme.placeholderInk;
       context.lineWidth = 12;
       context.beginPath();
       context.rect(184, 210, 144, 132);
@@ -755,7 +948,7 @@ class MultiAngleThreeWidget {
       context.lineTo(254, 278);
       context.lineTo(318, 342);
       context.stroke();
-      context.fillStyle = "#cbd5e1";
+      context.fillStyle = theme.placeholderText;
       context.font = "600 36px sans-serif";
       context.textAlign = "center";
       context.fillText("参考图", canvas.width / 2, 420);
@@ -794,7 +987,7 @@ class MultiAngleThreeWidget {
   height: 14.75rem;
   overflow: hidden;
   border-radius: calc(var(--radius) + 2px);
-  background: #070c16;
+  background: hsl(var(--preview-background));
   touch-action: none;
   user-select: none;
 }

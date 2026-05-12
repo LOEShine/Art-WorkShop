@@ -131,7 +131,7 @@ onBeforeUnmount(() => {
           :key="`${item}-${index}`"
           type="button"
           class="h-14 w-14 shrink-0 overflow-hidden rounded-md border-2 transition-colors"
-          :class="index === activeIndex ? 'border-blue-300 opacity-100' : 'border-white/20 opacity-70 hover:opacity-100'"
+          :class="index === activeIndex ? 'media-modal__thumb--active opacity-100' : 'border-white/20 opacity-70 hover:opacity-100'"
           @click="emit('select', index)"
         >
           <img
@@ -158,5 +158,10 @@ onBeforeUnmount(() => {
   max-width: 80vw !important;
   object-fit: contain;
   width: auto !important;
+}
+
+.media-modal__thumb--active {
+  border-color: hsl(var(--selection));
+  box-shadow: 0 0 0 1px hsl(var(--selection) / 0.34);
 }
 </style>
