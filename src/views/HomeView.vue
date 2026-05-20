@@ -73,6 +73,7 @@ import type {
   ImageModelId,
   ImageTask,
   SelectOption,
+  VideoConfigRecord,
   VideoTask,
 } from "@/types";
 
@@ -206,9 +207,12 @@ const videoUploadTargetIndex = ref<number | null>(null);
 let imageTimer: number | undefined;
 let videoTimer: number | undefined;
 let videoPollTimer: number | undefined;
+let videoSubmitRetryTimer: number | undefined;
+let wasPageHiddenDuringVideoSubmit = false;
 const cameraWheelScrollTimers: Partial<Record<keyof CameraParameterSelection, number>> = {};
 const cameraWheelAnimationFrames: Partial<Record<keyof CameraParameterSelection, number>> = {};
 const cameraWheelScrollTargets: Partial<Record<keyof CameraParameterSelection, number>> = {};
+const videoIconSrcCache = new Map<string, string>();
 
 function getImageModelIcon(modelId: string) {
   if (modelId === "gemini-3-pro-image-preview") {
@@ -232,6 +236,22 @@ function getVideoModelIcon(modelKey: string) {
   }
 
   return null;
+}
+
+function getVideoModelIconSrc(modelKey: string) {
+  const svg = VIDEO_MODELS[modelKey as keyof typeof VIDEO_MODELS]?.iconSvg?.trim();
+  if (!svg) {
+    return "";
+  }
+
+  const cached = videoIconSrcCache.get(modelKey);
+  if (cached) {
+    return cached;
+  }
+
+  const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  videoIconSrcCache.set(modelKey, src);
+  return src;
 }
 
 function getVideoBadgeIcon(badge: string) {
@@ -848,6 +868,38 @@ function getVeoExtendDisabledReason(task?: VideoTask | null) {
   return "";
 }
 
+function handleCurrentVideoError() {
+  const task = store.videoTask;
+  if (!task || task.phase !== "success" || !hasVideoTaskRemoteId(task)) {
+    return;
+  }
+
+  const refreshCount = Number(task.modelConfig?.playbackRefreshCount || 0);
+  if (Number.isFinite(refreshCount) && refreshCount >= 2) {
+    store.setVideoTask({
+      ...task,
+      error: "视频地址加载失败，请点下载或重新生成。",
+      updatedAt: Date.now(),
+    });
+    return;
+  }
+
+  store.setVideoTask({
+    ...task,
+    status: "REFRESHING_VIDEO_URL",
+    phase: "pending",
+    progress: "",
+    error: "视频地址加载失败，正在重新获取结果地址。",
+    videoUrl: "",
+    modelConfig: {
+      ...(task.modelConfig || {}),
+      playbackRefreshCount: Number.isFinite(refreshCount) ? refreshCount + 1 : 1,
+    },
+    updatedAt: Date.now(),
+  });
+  scheduleVideoPolling(300);
+}
+
 watch(
   () => [store.currentTask?.status, store.currentTask?.createdAt] as const,
   ([status, createdAt]) => {
@@ -933,6 +985,75 @@ function clearVideoPolling() {
   }
 }
 
+function clearVideoSubmitRetry() {
+  if (videoSubmitRetryTimer) {
+    window.clearTimeout(videoSubmitRetryTimer);
+    videoSubmitRetryTimer = undefined;
+  }
+}
+
+function cloneVideoConfig(config: VideoConfigRecord): VideoConfigRecord {
+  return Object.fromEntries(
+    Object.entries(config).map(([key, value]) => [
+      key,
+      Array.isArray(value) ? [...value] : value,
+    ]),
+  ) as VideoConfigRecord;
+}
+
+function hasVideoTaskRemoteId(task?: VideoTask | null) {
+  return Boolean(String(task?.id || "").trim());
+}
+
+function isVideoSubmitPlaceholder(task?: VideoTask | null) {
+  return Boolean(task?.phase === "pending" && !hasVideoTaskRemoteId(task));
+}
+
+function isRecoverableVideoSubmitError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /load failed|failed to fetch|networkerror|network request failed|aborted|cancel/i.test(message);
+}
+
+function buildRecoverableVideoSubmitMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/load failed/i.test(message)) {
+    return "移动端浏览器切后台中断了提交请求，回到页面后会按原参数继续。";
+  }
+
+  return `视频提交暂时中断，回到页面后会按原参数继续：${message}`;
+}
+
+function buildVideoSubmitConfigFromTask(task: VideoTask): VideoConfigRecord {
+  return {
+    ...cloneVideoConfig(task.modelConfig || {}),
+    prompt: String(task.prompt || task.modelConfig?.prompt || ""),
+  };
+}
+
+function shouldUseVideoSubmitKeepalive(task: VideoTask) {
+  return (task.sourceImages || []).length === 0;
+}
+
+function scheduleVideoSubmitRetry(delay = 1000) {
+  clearVideoSubmitRetry();
+
+  if (!isVideoSubmitPlaceholder(store.videoTask) || submittingVideo.value) {
+    return;
+  }
+
+  if (document.visibilityState === "hidden") {
+    return;
+  }
+
+  if ("onLine" in navigator && !navigator.onLine) {
+    return;
+  }
+
+  videoSubmitRetryTimer = window.setTimeout(() => {
+    void submitPendingVideoTask();
+  }, delay);
+}
+
 function scheduleVideoPolling(delay = 300) {
   clearVideoPolling();
 
@@ -943,6 +1064,63 @@ function scheduleVideoPolling(delay = 300) {
   videoPollTimer = window.setTimeout(() => {
     void refreshVideoTask();
   }, delay);
+}
+
+async function submitPendingVideoTask() {
+  const pendingTask = store.videoTask;
+  if (!pendingTask || !isVideoSubmitPlaceholder(pendingTask) || submittingVideo.value) {
+    return;
+  }
+
+  clearVideoSubmitRetry();
+  submittingVideo.value = true;
+
+  try {
+    const config = buildVideoSubmitConfigFromTask(pendingTask);
+    const submittedTask = await submitVideoTask({
+      modelKey: pendingTask.modelKey,
+      config,
+      apiBaseUrl: store.apiBaseUrl,
+      apiKey: store.apiKey,
+      keepalive: shouldUseVideoSubmitKeepalive(pendingTask),
+    });
+
+    store.setVideoTask({
+      ...pendingTask,
+      ...submittedTask,
+      modelConfig: config,
+      sourceImages: pendingTask.sourceImages,
+      createdAt: pendingTask.createdAt,
+      updatedAt: Date.now(),
+      error: "",
+    });
+    scheduleVideoPolling(300);
+  } catch (error) {
+    if (isRecoverableVideoSubmitError(error)) {
+      store.setVideoTask({
+        ...pendingTask,
+        status: "SUBMIT_RETRY",
+        phase: "pending",
+        progress: "",
+        error: buildRecoverableVideoSubmitMessage(error),
+        updatedAt: Date.now(),
+      });
+      scheduleVideoSubmitRetry(wasPageHiddenDuringVideoSubmit ? 600 : 5000);
+      return;
+    }
+
+    store.setVideoTask({
+      ...pendingTask,
+      status: "ERROR",
+      phase: "error",
+      progress: "",
+      error: error instanceof Error ? error.message : String(error),
+      updatedAt: Date.now(),
+    });
+  } finally {
+    submittingVideo.value = false;
+    wasPageHiddenDuringVideoSubmit = false;
+  }
 }
 
 async function refreshVideoTask(force = false) {
@@ -986,6 +1164,60 @@ async function refreshVideoTask(force = false) {
     scheduleVideoPolling(10000);
   }
 }
+
+function resumeVideoWork() {
+  if (document.visibilityState === "hidden") {
+    return;
+  }
+
+  const task = store.videoTask;
+  if (isVideoSubmitPlaceholder(task)) {
+    scheduleVideoSubmitRetry(250);
+    return;
+  }
+
+  if (task?.phase === "pending") {
+    void refreshVideoTask(true);
+  }
+}
+
+function handleVideoPageHidden() {
+  if (submittingVideo.value || store.videoTask?.phase === "pending") {
+    wasPageHiddenDuringVideoSubmit = true;
+  }
+}
+
+function handleVideoPageActive() {
+  resumeVideoWork();
+}
+
+function handleVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    handleVideoPageHidden();
+  } else {
+    handleVideoPageActive();
+  }
+}
+
+watch(
+  () => [store.videoTask?.phase, store.videoTask?.id, store.videoTask?.status] as const,
+  ([phase]) => {
+    if (phase === "pending" && isVideoSubmitPlaceholder(store.videoTask)) {
+      scheduleVideoSubmitRetry(250);
+      return;
+    }
+
+    if (phase === "pending") {
+      if (!videoPollTimer) {
+        scheduleVideoPolling(800);
+      }
+      return;
+    }
+
+    clearVideoPolling();
+    clearVideoSubmitRetry();
+  },
+);
 
 function clampIndex(index: number, length: number) {
   if (length <= 0) {
@@ -2296,19 +2528,22 @@ async function handleSubmitVideo() {
   }
 
   clearVideoPolling();
-  submittingVideo.value = true;
+  clearVideoSubmitRetry();
+  wasPageHiddenDuringVideoSubmit = false;
 
   const startedAt = Date.now();
+  const generationConfig: VideoConfigRecord = {
+    ...cloneVideoConfig(currentVideoConfig.value),
+    ...(store.selectedVideoModel === "veo3" ? { duration: "8" } : {}),
+  };
+  const sourceImages = currentVideoUploadItems.value.map((item) => item.source);
   const pendingTask: VideoTask = {
     id: "",
     modelKey: store.selectedVideoModel,
     modelTitle: VIDEO_MODELS[store.selectedVideoModel].title,
-    prompt: String(currentVideoConfig.value.prompt || ""),
-    modelConfig: {
-      ...currentVideoConfig.value,
-      ...(store.selectedVideoModel === "veo3" ? { duration: "8" } : {}),
-    },
-    sourceImages: currentVideoUploadItems.value.map((item) => item.source),
+    prompt: String(generationConfig.prompt || ""),
+    modelConfig: generationConfig,
+    sourceImages,
     status: "SUBMITTING",
     phase: "pending",
     progress: "",
@@ -2317,37 +2552,8 @@ async function handleSubmitVideo() {
     createdAt: startedAt,
     updatedAt: startedAt,
   };
-  store.setVideoTask(pendingTask);
-
-  try {
-    const task = await submitVideoTask({
-      modelKey: store.selectedVideoModel,
-      config: currentVideoConfig.value,
-      apiBaseUrl: store.apiBaseUrl,
-      apiKey: store.apiKey,
-    });
-    store.setVideoTask({
-      ...task,
-      createdAt: startedAt,
-      updatedAt: Date.now(),
-    });
-    scheduleVideoPolling(300);
-  } catch (error) {
-    store.setVideoTask({
-      id: "",
-      modelKey: store.selectedVideoModel,
-      modelTitle: VIDEO_MODELS[store.selectedVideoModel].title,
-      status: "ERROR",
-      phase: "error",
-      progress: "",
-      error: error instanceof Error ? error.message : String(error),
-      videoUrl: "",
-      createdAt: startedAt,
-      updatedAt: Date.now(),
-    });
-  } finally {
-    submittingVideo.value = false;
-  }
+  await store.setVideoTask(pendingTask);
+  await submitPendingVideoTask();
 }
 
 async function handleExtendVeoVideo(task: VideoTask | null | undefined) {
@@ -2462,15 +2668,26 @@ async function handleGlobalPaste(event: ClipboardEvent) {
 
 onMounted(() => {
   document.addEventListener("paste", handleGlobalPaste);
+  document.addEventListener("visibilitychange", handleVisibilityChange);
+  window.addEventListener("pagehide", handleVideoPageHidden);
+  window.addEventListener("pageshow", handleVideoPageActive);
+  window.addEventListener("focus", handleVideoPageActive);
+  window.addEventListener("online", handleVideoPageActive);
   window.requestAnimationFrame(ensureTextareaHeight);
   if (store.videoTask?.phase === "pending") {
-    scheduleVideoPolling(800);
+    resumeVideoWork();
   }
 });
 
 onBeforeUnmount(() => {
   document.removeEventListener("paste", handleGlobalPaste);
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
+  window.removeEventListener("pagehide", handleVideoPageHidden);
+  window.removeEventListener("pageshow", handleVideoPageActive);
+  window.removeEventListener("focus", handleVideoPageActive);
+  window.removeEventListener("online", handleVideoPageActive);
   clearVideoPolling();
+  clearVideoSubmitRetry();
   if (imageTimer) {
     window.clearInterval(imageTimer);
   }
@@ -3159,14 +3376,9 @@ onBeforeUnmount(() => {
                       v-if="getVideoModelIcon(model.key)"
                       class="h-4 w-4 shrink-0"
                     />
-                    <span
-                      v-else-if="model.iconSvg"
-                      class="inline-flex h-4 w-4 shrink-0 items-center justify-center [&_svg]:h-4 [&_svg]:w-4"
-                      v-html="model.iconSvg"
-                    />
                     <img
-                      v-else-if="model.iconSrc"
-                      :src="model.iconSrc"
+                      v-else-if="getVideoModelIconSrc(model.key) || model.iconSrc"
+                      :src="getVideoModelIconSrc(model.key) || model.iconSrc"
                       :alt="model.title"
                       class="h-4 w-4 shrink-0 object-contain"
                     />
@@ -3486,6 +3698,7 @@ onBeforeUnmount(() => {
                       controls
                       playsinline
                       class="aspect-video w-full"
+                      @error="handleCurrentVideoError"
                     />
                   </div>
 

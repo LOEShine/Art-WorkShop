@@ -7,9 +7,12 @@ import {
   VIDEO_TRANSIENT_KEYS,
 } from "@/data/video-models";
 import {
+  deleteCurrentVideoTask,
   deleteImageHistoryTask,
   loadImageHistory,
+  loadCurrentVideoTask,
   loadVideoHistory,
+  saveCurrentVideoTask,
   saveImageHistoryTask,
   saveVideoHistoryTask,
   deleteVideoHistoryTask,
@@ -139,12 +142,16 @@ export const useAppStore = defineStore("artWorkshop", {
   actions: {
     async hydrateHistory() {
       try {
-        const [imageHistory, videoHistory] = await Promise.all([
+        const [imageHistory, videoHistory, currentVideoTask] = await Promise.all([
           loadImageHistory(HISTORY_LIMIT),
           loadVideoHistory(HISTORY_LIMIT),
+          loadCurrentVideoTask(),
         ]);
         this.history = imageHistory;
         this.videoHistory = videoHistory;
+        if (!this.videoTask && currentVideoTask) {
+          this.videoTask = currentVideoTask;
+        }
       } catch (error) {
         console.error("[history-db] failed to load history:", error);
       } finally {
@@ -337,8 +344,21 @@ export const useAppStore = defineStore("artWorkshop", {
       normalizeVideoConfig(this.selectedVideoModel, config);
       this.persist();
     },
-    setVideoTask(task: VideoTask | null) {
+    async setVideoTask(task: VideoTask | null) {
       this.videoTask = task;
+      try {
+        if (task) {
+          await saveCurrentVideoTask(task);
+        } else {
+          await deleteCurrentVideoTask();
+        }
+      } catch (error) {
+        if (task) {
+          console.error("[history-db] failed to save current video task:", error);
+        } else {
+          console.error("[history-db] failed to clear current video task:", error);
+        }
+      }
       this.persist();
     },
   },

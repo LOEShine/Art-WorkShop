@@ -32,6 +32,7 @@ interface SubmitVideoArgs {
   config: VideoConfigRecord;
   apiBaseUrl: string;
   apiKey: string;
+  keepalive?: boolean;
 }
 
 interface SubmitVeoVideoExtensionArgs {
@@ -1021,6 +1022,7 @@ export async function submitVideoTask({
   apiBaseUrl,
   apiKey,
   config,
+  keepalive = false,
   modelKey,
 }: SubmitVideoArgs): Promise<VideoTask> {
   ensureApiKey(apiKey);
@@ -1062,6 +1064,7 @@ export async function submitVideoTask({
         Accept: "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
+      keepalive,
       body: JSON.stringify({
         model: getResolvedVideoModelId(modelKey, config),
         images,
@@ -1131,6 +1134,7 @@ export async function submitVideoTask({
           Accept: "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
+        keepalive,
         body: JSON.stringify({
           model: getResolvedVideoModelId(modelKey, config),
           prompt,
@@ -1216,6 +1220,7 @@ export async function submitVideoTask({
           Accept: "application/json",
           Authorization: `Bearer ${apiKey}`,
         },
+        keepalive,
         body: JSON.stringify(body),
       },
     );
@@ -1255,6 +1260,7 @@ export async function submitVideoTask({
       Accept: "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
+    keepalive,
     body: JSON.stringify({
       images: mode === "image" ? [config.primaryImageSource] : [],
       model: getResolvedVideoModelId(modelKey, config),

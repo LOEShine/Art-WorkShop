@@ -4,9 +4,11 @@ import type { DBSchema, IDBPDatabase } from "idb";
 import type { ImageTask, VideoTask } from "@/types";
 
 const DB_NAME = "art-workshop-db";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const IMAGE_HISTORY_STORE = "image-history";
 const VIDEO_HISTORY_STORE = "video-history";
+const CURRENT_VIDEO_TASK_STORE = "current-video-task";
+const CURRENT_VIDEO_TASK_KEY = "current";
 
 interface ArtWorkshopDb extends DBSchema {
   "image-history": {
@@ -21,6 +23,13 @@ interface ArtWorkshopDb extends DBSchema {
     value: VideoTask;
     indexes: {
       "by-createdAt": number;
+    };
+  };
+  "current-video-task": {
+    key: string;
+    value: {
+      key: string;
+      task: VideoTask;
     };
   };
 }
@@ -127,6 +136,12 @@ function getDatabase() {
           });
           store.createIndex("by-createdAt", "createdAt");
         }
+
+        if (!database.objectStoreNames.contains(CURRENT_VIDEO_TASK_STORE)) {
+          database.createObjectStore(CURRENT_VIDEO_TASK_STORE, {
+            keyPath: "key",
+          });
+        }
       },
     });
   }
@@ -200,4 +215,23 @@ export async function saveVideoHistoryTask(task: VideoTask, limit = 20): Promise
 export async function deleteVideoHistoryTask(taskId: string): Promise<void> {
   const database = await getDatabase();
   await database.delete(VIDEO_HISTORY_STORE, taskId);
+}
+
+export async function loadCurrentVideoTask(): Promise<VideoTask | null> {
+  const database = await getDatabase();
+  const record = await database.get(CURRENT_VIDEO_TASK_STORE, CURRENT_VIDEO_TASK_KEY);
+  return record?.task ? createPlaybackUrl(record.task) : null;
+}
+
+export async function saveCurrentVideoTask(task: VideoTask): Promise<void> {
+  const database = await getDatabase();
+  await database.put(CURRENT_VIDEO_TASK_STORE, {
+    key: CURRENT_VIDEO_TASK_KEY,
+    task: prepareVideoTaskForStorage(task),
+  });
+}
+
+export async function deleteCurrentVideoTask(): Promise<void> {
+  const database = await getDatabase();
+  await database.delete(CURRENT_VIDEO_TASK_STORE, CURRENT_VIDEO_TASK_KEY);
 }
