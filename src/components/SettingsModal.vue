@@ -6,7 +6,6 @@ import {
   buildApiUrl,
   CODEX_IMAGE_API_BASE_URL,
   CODEX_IMAGE_REMOTE_BASE_URL,
-  extractErrorMessage,
   VECTOR_API_BASE_URL,
 } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
@@ -64,19 +63,6 @@ function handleSave() {
   }, 2000);
 }
 
-async function readResponseError(response: Response): Promise<string> {
-  const text = await response.text();
-  let message = "";
-
-  try {
-    message = extractErrorMessage(JSON.parse(text));
-  } catch {
-    message = text.trim();
-  }
-
-  return message || `${response.status} ${response.statusText}`.trim();
-}
-
 async function testKey(kind: "api" | "codex") {
   const baseUrl = kind === "api" ? VECTOR_API_BASE_URL : CODEX_IMAGE_API_BASE_URL;
   const key = kind === "api" ? apiKey.value.trim() : codexApiKey.value.trim();
@@ -91,50 +77,26 @@ async function testKey(kind: "api" | "codex") {
   }
 
   try {
-    if (!key) {
-      throw new Error("请先填写 KEY");
-    }
-
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 90000);
-    const response = await fetch(buildApiUrl(baseUrl, "/v1/images/generations"), {
-      method: "POST",
+    const response = await fetch(buildApiUrl(baseUrl, "/v1/models"), {
+      method: "GET",
       headers: {
-        "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
       },
-      body: JSON.stringify({
-        model: "gpt-image-2",
-        prompt: "test image generation access",
-        size: "1024x1024",
-        quality: "high",
-        n: 1,
-        background: "auto",
-        moderation: "low",
-      }),
-      signal: controller.signal,
-    }).finally(() => {
-      window.clearTimeout(timeoutId);
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${await readResponseError(response)}`);
+      throw new Error(`HTTP ${response.status}`);
     }
-
-    await response.body?.cancel();
 
     if (kind === "api") {
       apiTestStatus.value = "success";
-      apiTestMessage.value = "API KEY 生图权限可用";
+      apiTestMessage.value = "API KEY 可用";
     } else {
       codexTestStatus.value = "success";
-      codexTestMessage.value = "CODEX KEY 生图权限可用";
+      codexTestMessage.value = "CODEX KEY 可用";
     }
   } catch (error) {
-    const message =
-      error instanceof DOMException && error.name === "AbortError"
-        ? "生图测试超时"
-        : `生图测试失败: ${error instanceof Error ? error.message : "网络错误"}`;
+    const message = `连接失败: ${error instanceof Error ? error.message : "网络错误"}`;
     if (kind === "api") {
       apiTestStatus.value = "error";
       apiTestMessage.value = message;
@@ -261,7 +223,7 @@ async function testKey(kind: "api" | "codex") {
               v-else
               class="h-4 w-4"
             />
-            {{ testingTarget === 'api' ? "测试中..." : "测试 API 生图" }}
+            {{ testingTarget === 'api' ? "测试中..." : "测试 API KEY" }}
           </button>
 
           <button
@@ -278,7 +240,7 @@ async function testKey(kind: "api" | "codex") {
               v-else
               class="h-4 w-4"
             />
-            {{ testingTarget === 'codex' ? "测试中..." : "测试 CODEX 生图" }}
+            {{ testingTarget === 'codex' ? "测试中..." : "测试 CODEX KEY" }}
           </button>
 
           <div
