@@ -51,10 +51,6 @@ function getPreferredThemeMode(): ThemeMode {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-function normalizeThemeMode(value: unknown): ThemeMode {
-  return value === "light" || value === "dark" ? value : getPreferredThemeMode();
-}
-
 function buildPersistedState(): PersistedState {
   const imageModelConfigs = createDefaultImageConfigs();
   const videoConfigs = createDefaultVideoConfigs();
@@ -108,7 +104,7 @@ function readPersistedState(): PersistedState {
       ...parsed,
       apiBaseUrl: VECTOR_API_BASE_URL,
       codexApiKey: parsed.codexApiKey ?? defaults.codexApiKey ?? "",
-      themeMode: normalizeThemeMode(parsed.themeMode ?? defaults.themeMode),
+      themeMode: getPreferredThemeMode(),
       imageModelConfigs,
       videoConfigs,
     };
@@ -181,7 +177,7 @@ export const useAppStore = defineStore("artWorkshop", {
         apiBaseUrl: this.apiBaseUrl,
         apiKey: this.apiKey,
         codexApiKey: this.codexApiKey,
-        themeMode: this.themeMode,
+        themeMode: getPreferredThemeMode(),
         generationMode: this.generationMode,
         selectedImageModel: this.selectedImageModel,
         imageModelConfigs: this.imageModelConfigs,
