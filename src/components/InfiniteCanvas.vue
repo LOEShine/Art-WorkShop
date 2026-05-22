@@ -2270,6 +2270,13 @@ watch(viewport, scheduleSave, { deep: true });
 
 <style scoped>
 .infinite-canvas {
+  --canvas-shadow-popover: 0 18px 44px hsl(0 0% 0% / 0.14);
+  --canvas-shadow-panel: 0 18px 48px hsl(0 0% 0% / 0.14);
+  --canvas-shadow-node: 0 10px 28px hsl(0 0% 0% / 0.1);
+  --canvas-shadow-node-selected: 0 14px 34px hsl(0 0% 0% / 0.14);
+  --canvas-shadow-floating: 0 10px 24px hsl(0 0% 0% / 0.16);
+  --canvas-shadow-preview: 0 20px 64px hsl(0 0% 0% / 0.18);
+  --canvas-shadow-dialog: 0 20px 60px hsl(0 0% 0% / 0.18);
   position: relative;
   height: calc(100dvh - 10.25rem);
   min-height: 34rem;
@@ -2278,6 +2285,16 @@ watch(viewport, scheduleSave, { deep: true });
   border-radius: var(--radius);
   background: hsl(var(--background));
   color: hsl(var(--foreground));
+}
+
+.dark .infinite-canvas {
+  --canvas-shadow-popover: 0 18px 44px hsl(0 0% 0% / 0.28);
+  --canvas-shadow-panel: 0 18px 48px hsl(0 0% 0% / 0.24);
+  --canvas-shadow-node: 0 10px 28px hsl(0 0% 0% / 0.18);
+  --canvas-shadow-node-selected: 0 14px 34px hsl(0 0% 0% / 0.24);
+  --canvas-shadow-floating: 0 10px 24px hsl(0 0% 0% / 0.28);
+  --canvas-shadow-preview: 0 20px 64px hsl(0 0% 0% / 0.32);
+  --canvas-shadow-dialog: 0 20px 60px hsl(0 0% 0% / 0.3);
 }
 
 .canvas-board {
@@ -2465,10 +2482,10 @@ watch(viewport, scheduleSave, { deep: true });
   overflow: auto;
   border: 1px solid hsl(var(--border));
   border-radius: var(--radius);
-  background: hsl(var(--popover));
+  background: hsl(var(--card));
   padding: 0.375rem;
-  color: hsl(var(--popover-foreground));
-  box-shadow: 0 18px 44px hsl(0 0% 0% / 0.28);
+  color: hsl(var(--foreground));
+  box-shadow: var(--canvas-shadow-popover);
   backdrop-filter: blur(18px);
 }
 
@@ -2550,7 +2567,7 @@ watch(viewport, scheduleSave, { deep: true });
   border-radius: var(--radius);
   background: hsl(var(--card) / 0.94);
   padding: 0.75rem;
-  box-shadow: 0 18px 48px hsl(0 0% 0% / 0.22);
+  box-shadow: var(--canvas-shadow-panel);
   backdrop-filter: blur(18px);
 }
 
@@ -2783,7 +2800,7 @@ watch(viewport, scheduleSave, { deep: true });
   border: 1px solid hsl(var(--border));
   border-radius: var(--radius);
   background: hsl(var(--card));
-  box-shadow: 0 10px 28px hsl(0 0% 0% / 0.12);
+  box-shadow: var(--canvas-shadow-node);
   cursor: move;
   user-select: none;
 }
@@ -2792,7 +2809,7 @@ watch(viewport, scheduleSave, { deep: true });
   border-color: hsl(var(--foreground) / 0.7);
   box-shadow:
     0 0 0 1px hsl(var(--foreground) / 0.5),
-    0 14px 34px hsl(0 0% 0% / 0.16);
+    var(--canvas-shadow-node-selected);
 }
 
 .canvas-node--generating {
@@ -2912,9 +2929,10 @@ watch(viewport, scheduleSave, { deep: true });
   overflow: auto;
   border: 1px solid hsl(var(--border));
   border-radius: calc(var(--radius) - 2px);
-  background: hsl(var(--popover));
+  background: hsl(var(--card));
   padding: 0.375rem;
-  box-shadow: 0 14px 34px hsl(0 0% 0% / 0.22);
+  color: hsl(var(--foreground));
+  box-shadow: var(--canvas-shadow-popover);
 }
 
 .canvas-mention-item {
@@ -3045,7 +3063,7 @@ watch(viewport, scheduleSave, { deep: true });
   border-radius: 9999px;
   background: hsl(var(--primary));
   color: hsl(var(--primary-foreground));
-  box-shadow: 0 10px 24px hsl(0 0% 0% / 0.2);
+  box-shadow: var(--canvas-shadow-floating);
 }
 
 .canvas-floating-generate {
@@ -3088,7 +3106,7 @@ watch(viewport, scheduleSave, { deep: true });
   border-radius: var(--radius);
   background: hsl(var(--card));
   padding: 0.75rem;
-  box-shadow: 0 20px 64px hsl(0 0% 0% / 0.26);
+  box-shadow: var(--canvas-shadow-preview);
 }
 
 .canvas-preview-head {
@@ -3127,7 +3145,7 @@ watch(viewport, scheduleSave, { deep: true });
   border-radius: var(--radius);
   background: hsl(var(--card));
   padding: 0.875rem;
-  box-shadow: 0 20px 60px hsl(0 0% 0% / 0.28);
+  box-shadow: var(--canvas-shadow-dialog);
 }
 
 .canvas-dialog-head,
