@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Check,
+  ChevronDown,
   Clipboard,
   Copy,
   Download,
@@ -176,6 +177,7 @@ const showLogPanel = ref(false);
 const previewNode = ref<CanvasNode | null>(null);
 const mentionState = ref<MentionState | null>(null);
 const nodeClipboard = ref<CanvasNode[]>([]);
+const openDropdown = ref("");
 
 let saveTimer: number | undefined;
 
@@ -240,6 +242,10 @@ const selectionLabel = computed(() => {
 });
 const activeWorkspaceTitle = computed(() => activeWorkspace.value?.title ?? "无限画布");
 const currentWorkspaceUpdatedAt = computed(() => formatTime(activeWorkspace.value?.updatedAt ?? Date.now()));
+const activeModelLabel = computed(() => activeImageModel.value.name);
+const activeAssetCategoryLabel = computed(
+  () => assetCategories.value.find((category) => category.id === activeAssetCategoryId.value)?.name ?? "资产库",
+);
 
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -650,6 +656,7 @@ function setImageModel(value: string) {
   const model = selectableImageModels.find((item) => item.id === value);
   if (model) {
     store.setSelectedImageModel(model.id);
+    openDropdown.value = "";
   }
 }
 
@@ -660,6 +667,21 @@ function setImageConfig(field: ImageModelField, rawValue: string) {
     field.key,
     (option?.value ?? rawValue) as ImageConfigValue,
   );
+  openDropdown.value = "";
+}
+
+function setAssetCategory(categoryId: string) {
+  activeAssetCategoryId.value = categoryId;
+  openDropdown.value = "";
+}
+
+function toggleDropdown(key: string) {
+  openDropdown.value = openDropdown.value === key ? "" : key;
+}
+
+function optionLabel(field: ImageModelField) {
+  const value = String(activeImageConfig.value[field.key] ?? field.default);
+  return field.options.find((option) => String(option.value) === value)?.label ?? value;
 }
 
 function pickImageFiles() {
@@ -1219,6 +1241,7 @@ function handleKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     previewNode.value = null;
     mentionState.value = null;
+    openDropdown.value = "";
     showCanvasPanel.value = false;
     showLogPanel.value = false;
     return;
@@ -1287,7 +1310,9 @@ watch(viewport, scheduleSave, { deep: true });
       <button
         type="button"
         class="canvas-tool-button"
+        :class="showCanvasPanel ? 'canvas-tool-button--active' : ''"
         title="画布管理"
+        :aria-pressed="showCanvasPanel"
         @click="showCanvasPanel = !showCanvasPanel"
       >
         <FolderOpen class="h-4 w-4" />
@@ -1313,43 +1338,85 @@ watch(viewport, scheduleSave, { deep: true });
         <span>图片</span>
       </button>
       <div class="canvas-toolbar-separator" />
-      <label class="canvas-select-label">
-        <Layers class="h-4 w-4" />
-        <select
-          :value="activeImageModelId"
-          class="canvas-select"
+      <div class="canvas-menu-wrap">
+        <button
+          type="button"
+          class="canvas-menu-button"
+          :class="openDropdown === 'model' ? 'canvas-menu-button--open' : ''"
           title="模型"
-          @change="setImageModel(($event.target as HTMLSelectElement).value)"
+          aria-haspopup="listbox"
+          :aria-expanded="openDropdown === 'model'"
+          @click.stop="toggleDropdown('model')"
         >
-          <option
+          <Layers class="h-4 w-4" />
+          <span>{{ activeModelLabel }}</span>
+          <ChevronDown class="h-3.5 w-3.5 canvas-menu-chevron" />
+        </button>
+        <div
+          v-if="openDropdown === 'model'"
+          class="canvas-dropdown canvas-dropdown--wide"
+          role="listbox"
+          @pointerdown.stop
+        >
+          <button
             v-for="model in selectableImageModels"
             :key="model.id"
-            :value="model.id"
+            type="button"
+            class="canvas-dropdown-option"
+            :class="model.id === activeImageModelId ? 'canvas-dropdown-option--selected' : ''"
+            role="option"
+            :aria-selected="model.id === activeImageModelId"
+            @click="setImageModel(model.id)"
           >
-            {{ model.name }}
-          </option>
-        </select>
-      </label>
-      <label
+            <span>{{ model.name }}</span>
+            <Check
+              v-if="model.id === activeImageModelId"
+              class="h-3.5 w-3.5"
+            />
+          </button>
+        </div>
+      </div>
+      <div
         v-for="field in activeImageModel.options"
         :key="field.key"
-        class="canvas-select-label canvas-select-label--compact"
+        class="canvas-menu-wrap"
       >
-        <select
-          :value="String(activeImageConfig[field.key] ?? field.default)"
-          class="canvas-select"
+        <button
+          type="button"
+          class="canvas-menu-button canvas-menu-button--compact"
+          :class="openDropdown === `field-${field.key}` ? 'canvas-menu-button--open' : ''"
           :title="field.label"
-          @change="setImageConfig(field, ($event.target as HTMLSelectElement).value)"
+          aria-haspopup="listbox"
+          :aria-expanded="openDropdown === `field-${field.key}`"
+          @click.stop="toggleDropdown(`field-${field.key}`)"
         >
-          <option
+          <span>{{ optionLabel(field) }}</span>
+          <ChevronDown class="h-3.5 w-3.5 canvas-menu-chevron" />
+        </button>
+        <div
+          v-if="openDropdown === `field-${field.key}`"
+          class="canvas-dropdown"
+          role="listbox"
+          @pointerdown.stop
+        >
+          <button
             v-for="option in field.options"
             :key="String(option.value)"
-            :value="String(option.value)"
+            type="button"
+            class="canvas-dropdown-option"
+            :class="String(activeImageConfig[field.key] ?? field.default) === String(option.value) ? 'canvas-dropdown-option--selected' : ''"
+            role="option"
+            :aria-selected="String(activeImageConfig[field.key] ?? field.default) === String(option.value)"
+            @click="setImageConfig(field, String(option.value))"
           >
-            {{ option.label }}
-          </option>
-        </select>
-      </label>
+            <span>{{ option.label }}</span>
+            <Check
+              v-if="String(activeImageConfig[field.key] ?? field.default) === String(option.value)"
+              class="h-3.5 w-3.5"
+            />
+          </button>
+        </div>
+      </div>
       <div class="canvas-toolbar-separator" />
       <button
         type="button"
@@ -1386,7 +1453,9 @@ watch(viewport, scheduleSave, { deep: true });
       <button
         type="button"
         class="canvas-icon-button"
+        :class="showAssetPanel ? 'canvas-icon-button--active' : ''"
         title="资产库"
+        :aria-pressed="showAssetPanel"
         @click="showAssetPanel = !showAssetPanel"
       >
         <Library class="h-4 w-4" />
@@ -1394,7 +1463,9 @@ watch(viewport, scheduleSave, { deep: true });
       <button
         type="button"
         class="canvas-icon-button"
+        :class="showLogPanel ? 'canvas-icon-button--active' : ''"
         title="生成日志"
+        :aria-pressed="showLogPanel"
         @click="showLogPanel = !showLogPanel"
       >
         <History class="h-4 w-4" />
@@ -1521,18 +1592,42 @@ watch(viewport, scheduleSave, { deep: true });
         </button>
       </header>
       <div class="canvas-panel-actions">
-        <select
-          v-model="activeAssetCategoryId"
-          class="canvas-select canvas-asset-select"
-        >
-          <option
-            v-for="category in assetCategories"
-            :key="category.id"
-            :value="category.id"
+        <div class="canvas-menu-wrap canvas-menu-wrap--asset">
+          <button
+            type="button"
+            class="canvas-menu-button canvas-menu-button--asset"
+            :class="openDropdown === 'asset-category' ? 'canvas-menu-button--open' : ''"
+            aria-haspopup="listbox"
+            :aria-expanded="openDropdown === 'asset-category'"
+            @click.stop="toggleDropdown('asset-category')"
           >
-            {{ category.name }}
-          </option>
-        </select>
+            <span>{{ activeAssetCategoryLabel }}</span>
+            <ChevronDown class="h-3.5 w-3.5 canvas-menu-chevron" />
+          </button>
+          <div
+            v-if="openDropdown === 'asset-category'"
+            class="canvas-dropdown"
+            role="listbox"
+            @pointerdown.stop
+          >
+            <button
+              v-for="category in assetCategories"
+              :key="category.id"
+              type="button"
+              class="canvas-dropdown-option"
+              :class="category.id === activeAssetCategoryId ? 'canvas-dropdown-option--selected' : ''"
+              role="option"
+              :aria-selected="category.id === activeAssetCategoryId"
+              @click="setAssetCategory(category.id)"
+            >
+              <span>{{ category.name }}</span>
+              <Check
+                v-if="category.id === activeAssetCategoryId"
+                class="h-3.5 w-3.5"
+              />
+            </button>
+          </div>
+        </div>
         <button
           type="button"
           class="canvas-icon-button"
@@ -1992,6 +2087,14 @@ watch(viewport, scheduleSave, { deep: true });
   background: hsl(var(--accent));
 }
 
+.canvas-tool-button--active,
+.canvas-icon-button--active {
+  border-color: hsl(var(--foreground) / 0.42);
+  background: hsl(var(--selection));
+  color: hsl(var(--foreground));
+  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.08);
+}
+
 .canvas-icon-button--danger:hover {
   border-color: hsl(var(--destructive) / 0.45);
   color: hsl(var(--destructive));
@@ -2003,36 +2106,127 @@ watch(viewport, scheduleSave, { deep: true });
   background: hsl(var(--border));
 }
 
-.canvas-select-label {
+.canvas-menu-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.canvas-menu-wrap--asset {
+  flex: 1;
+}
+
+.canvas-menu-button {
   display: inline-flex;
   height: 2rem;
   min-width: 0;
+  max-width: 12rem;
   align-items: center;
-  gap: 0.375rem;
+  justify-content: space-between;
+  gap: 0.5rem;
   border: 1px solid hsl(var(--border));
   border-radius: calc(var(--radius) - 2px);
   background: hsl(var(--background));
-  padding: 0 0.5rem;
-  color: hsl(var(--muted-foreground));
-}
-
-.canvas-select-label--compact {
-  padding-right: 0.25rem;
-}
-
-.canvas-select {
-  min-width: 0;
-  max-width: 11rem;
-  border: 0;
-  background: transparent;
+  padding: 0 0.625rem;
   color: hsl(var(--foreground));
   font-size: 0.8125rem;
-  font-weight: 600;
-  outline: none;
+  font-weight: 700;
+  transition:
+    background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 150ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.canvas-select-label--compact .canvas-select {
-  max-width: 8rem;
+.canvas-menu-button:hover,
+.canvas-menu-button--open {
+  border-color: hsl(var(--muted-foreground) / 0.5);
+  background: hsl(var(--accent));
+}
+
+.canvas-menu-button--open {
+  box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.08);
+}
+
+.canvas-menu-button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-menu-button--compact {
+  max-width: 9rem;
+}
+
+.canvas-menu-button--asset {
+  width: 100%;
+  max-width: none;
+}
+
+.canvas-menu-chevron {
+  flex: 0 0 auto;
+  color: hsl(var(--muted-foreground));
+  transition: transform 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.canvas-menu-button--open .canvas-menu-chevron {
+  transform: rotate(180deg);
+}
+
+.canvas-dropdown {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.375rem);
+  z-index: 40;
+  display: grid;
+  width: max-content;
+  min-width: 100%;
+  max-width: min(18rem, calc(100vw - 2rem));
+  max-height: 18rem;
+  gap: 0.25rem;
+  overflow: auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--popover));
+  padding: 0.375rem;
+  color: hsl(var(--popover-foreground));
+  box-shadow: 0 18px 44px hsl(0 0% 0% / 0.28);
+  backdrop-filter: blur(18px);
+}
+
+.canvas-dropdown--wide {
+  min-width: 12rem;
+}
+
+.canvas-dropdown-option {
+  display: flex;
+  min-width: 0;
+  height: 2rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-radius: calc(var(--radius) - 3px);
+  padding: 0 0.5rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.8125rem;
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.canvas-dropdown-option:hover {
+  background: hsl(var(--accent));
+  color: hsl(var(--foreground));
+}
+
+.canvas-dropdown-option--selected {
+  background: hsl(var(--selection));
+  color: hsl(var(--foreground));
+}
+
+.canvas-dropdown-option span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .canvas-status {
@@ -2192,15 +2386,6 @@ watch(viewport, scheduleSave, { deep: true });
   color: hsl(var(--muted-foreground));
   font-size: 0.6875rem;
   font-weight: 600;
-}
-
-.canvas-asset-select {
-  max-width: 10rem;
-  height: 2rem;
-  border: 1px solid hsl(var(--border));
-  border-radius: calc(var(--radius) - 2px);
-  background: hsl(var(--background));
-  padding: 0 0.5rem;
 }
 
 .canvas-asset-drop {
@@ -2620,7 +2805,7 @@ watch(viewport, scheduleSave, { deep: true });
     overflow-y: auto;
   }
 
-  .canvas-select {
+  .canvas-menu-button {
     max-width: 8rem;
   }
 
