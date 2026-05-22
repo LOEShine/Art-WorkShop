@@ -14,6 +14,7 @@ import {
   ImagePlus,
   Layers,
   Library,
+  Link as LinkIcon,
   LoaderCircle,
   LocateFixed,
   Maximize2,
@@ -25,6 +26,7 @@ import {
   Save,
   Sparkles,
   Trash2,
+  Unlink,
   Upload,
   X,
   ZoomIn,
@@ -82,7 +84,14 @@ interface CanvasWorkspace {
   createdAt: number;
   updatedAt: number;
   nodes: CanvasNode[];
+  links: CanvasLink[];
   viewport: Viewport;
+}
+
+interface CanvasLink {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
 }
 
 interface CanvasAssetCategory {
@@ -115,6 +124,7 @@ interface PersistedCanvas {
   workspaces?: CanvasWorkspace[];
   activeWorkspaceId?: string;
   nodes?: CanvasNode[];
+  links?: CanvasLink[];
   viewport?: Viewport;
   assets?: CanvasAsset[];
   assetCategories?: CanvasAssetCategory[];
@@ -153,11 +163,13 @@ const STORAGE_KEY = "art-workshop-infinite-canvas-v1";
 const HIDDEN_CANVAS_MODEL_IDS = new Set<ImageModelId>(["qwen-image-edit-multiple-angles"]);
 const MIN_ZOOM = 0.28;
 const MAX_ZOOM = 2.2;
+const GENERATION_TIMEOUT_MS = 8 * 60 * 1000;
 
 const boardRef = ref<HTMLElement | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
 const importInput = ref<HTMLInputElement | null>(null);
 const nodes = ref<CanvasNode[]>([]);
+const links = ref<CanvasLink[]>([]);
 const selectedIds = ref<string[]>([]);
 const viewport = ref<Viewport>({ x: 0, y: 0, scale: 0.86 });
 const dragState = ref<DragState | null>(null);
@@ -178,8 +190,11 @@ const previewNode = ref<CanvasNode | null>(null);
 const mentionState = ref<MentionState | null>(null);
 const nodeClipboard = ref<CanvasNode[]>([]);
 const openDropdown = ref("");
+const assetCategoryDialogOpen = ref(false);
+const assetCategoryDraft = ref("新文件夹");
 
 let saveTimer: number | undefined;
+const activeRuns = new Map<string, string>();
 
 const selectableImageModels = IMAGE_MODELS.filter((model) => !HIDDEN_CANVAS_MODEL_IDS.has(model.id));
 const activeImageModelId = computed<ImageModelId>(() =>
@@ -228,6 +243,10 @@ const activePromptNode = computed(() => {
   const selectedPrompt = selectedNodes.value.find((node) => node.kind === "prompt");
   return selectedPrompt ?? nodes.value.find((node) => node.kind === "prompt") ?? null;
 });
+const visibleLinks = computed(() => {
+  const nodeIds = new Set(nodes.value.map((node) => node.id));
+  return links.value.filter((link) => nodeIds.has(link.fromNodeId) && nodeIds.has(link.toNodeId));
+});
 const worldStyle = computed(() => ({
   transform: `translate(${viewport.value.x}px, ${viewport.value.y}px) scale(${viewport.value.scale})`,
 }));
@@ -259,6 +278,18 @@ function cloneNodes(value: CanvasNode[]) {
   return JSON.parse(JSON.stringify(value)) as CanvasNode[];
 }
 
+function normalizeNodes(value: CanvasNode[]) {
+  return cloneNodes(value).map((node) => ({
+    ...node,
+    status: node.status === "generating" ? "idle" : node.status,
+    error: node.status === "generating" ? "" : node.error,
+  }));
+}
+
+function cloneLinks(value: CanvasLink[]) {
+  return JSON.parse(JSON.stringify(value)) as CanvasLink[];
+}
+
 function cloneViewport(value: Viewport) {
   return { x: value.x, y: value.y, scale: value.scale };
 }
@@ -279,7 +310,8 @@ function createWorkspace(title = "无限画布", initialNodes?: CanvasNode[]): C
     title,
     createdAt: now,
     updatedAt: now,
-    nodes: cloneNodes(initialNodes ?? [createPromptNode(-170, -110)]),
+    nodes: normalizeNodes(initialNodes ?? [createPromptNode(-170, -110)]),
+    links: [],
     viewport: { x: 0, y: 0, scale: 0.86 },
   };
 }
@@ -332,7 +364,8 @@ function loadCanvas() {
         if (Array.isArray(parsed.workspaces) && parsed.workspaces.length > 0) {
           workspaces.value = parsed.workspaces.map((workspace) => ({
             ...workspace,
-            nodes: (workspace.nodes || []).filter((node) => node.kind === "image" || node.kind === "prompt"),
+            nodes: normalizeNodes((workspace.nodes || []).filter((node) => node.kind === "image" || node.kind === "prompt")),
+            links: Array.isArray(workspace.links) ? workspace.links : [],
             viewport: {
               x: Number(workspace.viewport?.x || 0),
               y: Number(workspace.viewport?.y || 0),
@@ -343,6 +376,7 @@ function loadCanvas() {
         } else {
           const legacyNodes = (parsed.nodes || []).filter((node) => node.kind === "image" || node.kind === "prompt");
           const workspace = createWorkspace("无限画布", legacyNodes.length ? legacyNodes : undefined);
+          workspace.links = Array.isArray(parsed.links) ? parsed.links : [];
           workspace.viewport = {
             x: Number(parsed.viewport?.x || 0),
             y: Number(parsed.viewport?.y || 0),
@@ -378,7 +412,8 @@ function syncActiveWorkspace() {
   if (!workspace) {
     return;
   }
-  workspace.nodes = cloneNodes(nodes.value);
+  workspace.nodes = normalizeNodes(nodes.value);
+  workspace.links = cloneLinks(visibleLinks.value);
   workspace.viewport = cloneViewport(viewport.value);
   workspace.updatedAt = Date.now();
 }
@@ -420,7 +455,8 @@ function openWorkspace(workspaceId: string, shouldSync = true) {
     return;
   }
   activeWorkspaceId.value = workspace.id;
-  nodes.value = cloneNodes(workspace.nodes);
+  nodes.value = normalizeNodes(workspace.nodes);
+  links.value = cloneLinks(workspace.links || []);
   viewport.value = cloneViewport(workspace.viewport);
   selectedIds.value = [];
   mentionState.value = null;
@@ -520,6 +556,7 @@ function addImageNode(src: string, title: string, x: number, y: number) {
 
 function removeNode(nodeId: string) {
   nodes.value = nodes.value.filter((node) => node.id !== nodeId);
+  links.value = links.value.filter((link) => link.fromNodeId !== nodeId && link.toNodeId !== nodeId);
   selectedIds.value = selectedIds.value.filter((id) => id !== nodeId);
 
   if (nodes.value.length === 0) {
@@ -534,6 +571,9 @@ function removeSelectedNodes() {
     return;
   }
   nodes.value = nodes.value.filter((node) => !selectedIds.value.includes(node.id));
+  links.value = links.value.filter(
+    (link) => !selectedIds.value.includes(link.fromNodeId) && !selectedIds.value.includes(link.toNodeId),
+  );
   selectedIds.value = [];
   if (nodes.value.length === 0) {
     addPromptNode();
@@ -590,6 +630,7 @@ function clearCanvas() {
   const center = boardCenterWorld();
   const node = createPromptNode(center.x - 165, center.y - 114);
   nodes.value = [node];
+  links.value = [];
   selectedIds.value = [node.id];
   scheduleSave();
 }
@@ -684,6 +725,90 @@ function optionLabel(field: ImageModelField) {
   return field.options.find((option) => String(option.value) === value)?.label ?? value;
 }
 
+function getNode(nodeId: string) {
+  return nodes.value.find((node) => node.id === nodeId) ?? null;
+}
+
+function isLinked(fromNodeId: string, toNodeId: string) {
+  return links.value.some((link) => link.fromNodeId === fromNodeId && link.toNodeId === toNodeId);
+}
+
+function addLink(fromNodeId: string, toNodeId: string) {
+  const from = getNode(fromNodeId);
+  const to = getNode(toNodeId);
+  if (!from || !to || from.kind !== "image" || to.kind !== "prompt" || isLinked(fromNodeId, toNodeId)) {
+    return;
+  }
+  links.value = [...links.value, { id: createId("link"), fromNodeId, toNodeId }];
+  scheduleSave();
+}
+
+function removeLink(linkId: string) {
+  links.value = links.value.filter((link) => link.id !== linkId);
+  scheduleSave();
+}
+
+function toggleImageLinkToPrompt(imageNode: CanvasNode, promptNode = activePromptNode.value) {
+  if (!promptNode || imageNode.kind !== "image") {
+    return;
+  }
+  const existing = links.value.find((link) => link.fromNodeId === imageNode.id && link.toNodeId === promptNode.id);
+  if (existing) {
+    removeLink(existing.id);
+    return;
+  }
+  addLink(imageNode.id, promptNode.id);
+}
+
+function linkSelectedImagesToPrompt(promptNode = activePromptNode.value) {
+  if (!promptNode) {
+    return;
+  }
+  for (const node of selectedImageNodes.value) {
+    addLink(node.id, promptNode.id);
+  }
+}
+
+function unlinkPromptImages(promptNode: CanvasNode) {
+  links.value = links.value.filter((link) => link.toNodeId !== promptNode.id);
+  scheduleSave();
+}
+
+function nodeCenter(node: CanvasNode, side: "left" | "right") {
+  return {
+    x: side === "right" ? node.x + node.width : node.x,
+    y: node.y + node.height / 2,
+  };
+}
+
+function linkPath(link: CanvasLink) {
+  const from = getNode(link.fromNodeId);
+  const to = getNode(link.toNodeId);
+  if (!from || !to) {
+    return "";
+  }
+  const start = nodeCenter(from, "right");
+  const end = nodeCenter(to, "left");
+  const delta = Math.max(80, Math.abs(end.x - start.x) * 0.45);
+  return `M ${start.x} ${start.y} C ${start.x + delta} ${start.y}, ${end.x - delta} ${end.y}, ${end.x} ${end.y}`;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 function pickImageFiles() {
   imageInput.value?.click();
 }
@@ -751,14 +876,20 @@ function addAssetToCanvas(asset: CanvasAsset) {
   addImageNode(asset.src, asset.title, center.x - 150, center.y - 135);
 }
 
-function createAssetCategory() {
-  const name = window.prompt("新资产文件夹名称", "新文件夹");
-  if (!name?.trim()) {
+function openAssetCategoryDialog() {
+  assetCategoryDraft.value = "新文件夹";
+  assetCategoryDialogOpen.value = true;
+}
+
+function confirmAssetCategory() {
+  const name = assetCategoryDraft.value.trim();
+  if (!name) {
     return;
   }
-  const category = { id: createId("asset-category"), name: name.trim().slice(0, 40) };
+  const category = { id: createId("asset-category"), name: name.slice(0, 40) };
   assetCategories.value = [...assetCategories.value, category];
   activeAssetCategoryId.value = category.id;
+  assetCategoryDialogOpen.value = false;
   scheduleSave();
 }
 
@@ -1005,10 +1136,15 @@ async function buildSourceImages(node: CanvasNode) {
   const mentionedAssetSources = assets.value
     .filter((asset) => mentionTitles.has(normalizeMentionTitle(asset.title)))
     .map((asset) => asset.src);
+  const linkedSources = links.value
+    .filter((link) => link.toNodeId === node.id)
+    .map((link) => getNode(link.fromNodeId))
+    .filter((sourceNode): sourceNode is CanvasNode => Boolean(sourceNode?.src))
+    .map((sourceNode) => sourceNode.src || "");
   const selectedSources = selectedImageNodes.value
     .filter((sourceNode) => sourceNode.id !== node.id)
     .map((sourceNode) => sourceNode.src || "");
-  const sources = [...mentionedNodeSources, ...mentionedAssetSources, ...selectedSources]
+  const sources = [...linkedSources, ...mentionedNodeSources, ...mentionedAssetSources, ...selectedSources]
     .filter((source, index, list) => Boolean(source) && list.indexOf(source) === index)
     .slice(0, activeUploadLimit.value);
 
@@ -1043,6 +1179,11 @@ function buildCanvasImageTask(
 function countNodeReferences(node: CanvasNode) {
   const mentionTitles = parseMentionTitles(node.prompt || "");
   const mentioned = [
+    ...links.value
+      .filter((link) => link.toNodeId === node.id)
+      .map((link) => getNode(link.fromNodeId))
+      .filter((sourceNode): sourceNode is CanvasNode => Boolean(sourceNode?.src))
+      .map((sourceNode) => sourceNode.src || ""),
     ...nodes.value
       .filter((sourceNode) => sourceNode.kind === "image" && sourceNode.src && mentionTitles.has(normalizeMentionTitle(sourceNode.title)))
       .map((sourceNode) => sourceNode.src || ""),
@@ -1063,6 +1204,8 @@ async function runPromptNode(node: CanvasNode) {
   }
 
   const startedAt = Date.now();
+  const runId = createId("run");
+  activeRuns.set(node.id, runId);
   node.status = "generating";
   node.error = "";
   scheduleSave();
@@ -1074,14 +1217,22 @@ async function runPromptNode(node: CanvasNode) {
     const generationPrompt = cleanPromptForGeneration(prompt);
     const task = buildCanvasImageTask(generationPrompt, model, config, sourceImages, startedAt);
     const usesCodexImageKey = model === "codex-image-2";
-    const result = await generateImage({
-      model,
-      prompt: generationPrompt,
-      sourceImages,
-      config,
-      apiBaseUrl: usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl,
-      apiKey: usesCodexImageKey ? store.codexApiKey : store.apiKey,
-    });
+    const result = await withTimeout(
+      generateImage({
+        model,
+        prompt: generationPrompt,
+        sourceImages,
+        config,
+        apiBaseUrl: usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl,
+        apiKey: usesCodexImageKey ? store.codexApiKey : store.apiKey,
+      }),
+      GENERATION_TIMEOUT_MS,
+      "生成超时，请重试",
+    );
+
+    if (activeRuns.get(node.id) !== runId) {
+      return;
+    }
 
     const resultImages = result.images.filter(Boolean);
     resultImages.forEach((source, index) => {
@@ -1113,6 +1264,9 @@ async function runPromptNode(node: CanvasNode) {
     logs.value = [logEntry, ...logs.value].slice(0, 100);
     node.status = "success";
   } catch (error) {
+    if (activeRuns.get(node.id) !== runId) {
+      return;
+    }
     node.status = "error";
     node.error = error instanceof Error ? error.message : "生成失败";
     const logEntry: CanvasLogEntry = {
@@ -1128,8 +1282,18 @@ async function runPromptNode(node: CanvasNode) {
     };
     logs.value = [logEntry, ...logs.value].slice(0, 100);
   } finally {
+    if (activeRuns.get(node.id) === runId) {
+      activeRuns.delete(node.id);
+    }
     scheduleSave();
   }
+}
+
+function stopPromptNode(node: CanvasNode) {
+  activeRuns.delete(node.id);
+  node.status = "idle";
+  node.error = "";
+  scheduleSave();
 }
 
 function downloadImage(node: CanvasNode) {
@@ -1202,12 +1366,18 @@ async function handleImportFile(event: Event) {
       ...parsed.workspace,
       id: createId("canvas"),
       title: `${parsed.workspace.title || "导入画布"} 导入`,
+      nodes: normalizeNodes(parsed.workspace.nodes || []),
+      links: Array.isArray(parsed.workspace.links) ? parsed.workspace.links : [],
       updatedAt: Date.now(),
     };
     workspaces.value = [workspace, ...workspaces.value];
     openWorkspace(workspace.id, false);
   } else if (Array.isArray(parsed.workspaces) && parsed.workspaces.length) {
-    workspaces.value = parsed.workspaces;
+    workspaces.value = parsed.workspaces.map((workspace) => ({
+      ...workspace,
+      nodes: normalizeNodes(workspace.nodes || []),
+      links: Array.isArray(workspace.links) ? workspace.links : [],
+    }));
     activeWorkspaceId.value = parsed.activeWorkspaceId || parsed.workspaces[0].id;
     openWorkspace(activeWorkspaceId.value, false);
   }
@@ -1285,6 +1455,7 @@ onBeforeUnmount(() => {
 });
 
 watch(nodes, scheduleSave, { deep: true });
+watch(links, scheduleSave, { deep: true });
 watch(viewport, scheduleSave, { deep: true });
 </script>
 
@@ -1632,7 +1803,7 @@ watch(viewport, scheduleSave, { deep: true });
           type="button"
           class="canvas-icon-button"
           title="新增文件夹"
-          @click="createAssetCategory"
+          @click="openAssetCategoryDialog"
         >
           <Plus class="h-4 w-4" />
         </button>
@@ -1747,6 +1918,54 @@ watch(viewport, scheduleSave, { deep: true });
     </aside>
 
     <div
+      v-if="assetCategoryDialogOpen"
+      class="canvas-dialog-backdrop"
+      @click="assetCategoryDialogOpen = false"
+    >
+      <form
+        class="canvas-dialog"
+        @submit.prevent="confirmAssetCategory"
+        @click.stop
+      >
+        <header class="canvas-dialog-head">
+          <div>
+            <div class="canvas-panel-title">新资产文件夹</div>
+            <div class="canvas-panel-subtitle">用于整理资产库图片</div>
+          </div>
+          <button
+            type="button"
+            class="canvas-node-icon-button"
+            title="关闭"
+            @click="assetCategoryDialogOpen = false"
+          >
+            <X class="h-3.5 w-3.5" />
+          </button>
+        </header>
+        <input
+          v-model="assetCategoryDraft"
+          class="canvas-dialog-input"
+          maxlength="40"
+          autofocus
+        />
+        <footer class="canvas-dialog-actions">
+          <button
+            type="button"
+            class="canvas-tool-button"
+            @click="assetCategoryDialogOpen = false"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            class="canvas-generate-button"
+          >
+            确定
+          </button>
+        </footer>
+      </form>
+    </div>
+
+    <div
       ref="boardRef"
       class="canvas-board"
       @pointerdown="startBoardPan"
@@ -1758,6 +1977,39 @@ watch(viewport, scheduleSave, { deep: true });
         class="canvas-world"
         :style="worldStyle"
       >
+        <svg
+          class="canvas-links"
+          viewBox="0 0 6000 4200"
+          aria-hidden="true"
+        >
+          <defs>
+            <marker
+              id="canvas-link-arrow"
+              markerWidth="8"
+              markerHeight="8"
+              refX="7"
+              refY="4"
+              orient="auto"
+              markerUnits="strokeWidth"
+            >
+              <path
+                d="M 0 0 L 8 4 L 0 8 z"
+                class="canvas-link-arrow"
+              />
+            </marker>
+          </defs>
+          <g
+            v-for="link in visibleLinks"
+            :key="link.id"
+            class="canvas-link-group"
+          >
+            <path
+              class="canvas-link-path"
+              :d="linkPath(link)"
+              marker-end="url(#canvas-link-arrow)"
+            />
+          </g>
+        </svg>
         <article
           v-for="node in nodes"
           :key="node.id"
@@ -1792,6 +2044,16 @@ watch(viewport, scheduleSave, { deep: true });
                 @click.stop="selectedIds = [node.id]; duplicateSelectedNodes()"
               >
                 <Copy class="h-3.5 w-3.5" />
+              </button>
+              <button
+                v-if="node.kind === 'image' && node.src"
+                type="button"
+                class="canvas-node-icon-button"
+                :class="activePromptNode && isLinked(node.id, activePromptNode.id) ? 'canvas-node-icon-button--active' : ''"
+                title="连接到当前提示词"
+                @click.stop="toggleImageLinkToPrompt(node)"
+              >
+                <LinkIcon class="h-3.5 w-3.5" />
               </button>
               <button
                 v-if="node.kind === 'image' && node.src"
@@ -1858,10 +2120,27 @@ watch(viewport, scheduleSave, { deep: true });
               <span class="canvas-reference-pill">{{ countNodeReferences(node) }} 张参考</span>
               <button
                 type="button"
+                class="canvas-node-icon-button"
+                title="把选中图片连接到这个提示词"
+                :disabled="selectedImageNodes.length === 0"
+                @click.stop="linkSelectedImagesToPrompt(node)"
+              >
+                <LinkIcon class="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                class="canvas-node-icon-button"
+                title="断开这个提示词的全部连线"
+                @click.stop="unlinkPromptImages(node)"
+              >
+                <Unlink class="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
                 class="canvas-generate-button"
-                :disabled="!String(node.prompt || '').trim() || node.status === 'generating'"
-                title="生成图片"
-                @click.stop="runPromptNode(node)"
+                :disabled="!String(node.prompt || '').trim() && node.status !== 'generating'"
+                :title="node.status === 'generating' ? '停止生成' : '生成图片'"
+                @click.stop="node.status === 'generating' ? stopPromptNode(node) : runPromptNode(node)"
               >
                 <LoaderCircle
                   v-if="node.status === 'generating'"
@@ -1871,7 +2150,7 @@ watch(viewport, scheduleSave, { deep: true });
                   v-else
                   class="h-4 w-4"
                 />
-                <span>{{ node.status === "generating" ? "生成中" : "生成" }}</span>
+                <span>{{ node.status === "generating" ? "停止" : "生成" }}</span>
               </button>
             </div>
             <p
@@ -1917,9 +2196,9 @@ watch(viewport, scheduleSave, { deep: true });
       v-if="activePromptNode"
       type="button"
       class="canvas-floating-generate"
-      :disabled="!String(activePromptNode.prompt || '').trim() || activePromptNode.status === 'generating'"
-      title="运行当前提示词"
-      @click="runPromptNode(activePromptNode)"
+      :disabled="!String(activePromptNode.prompt || '').trim() && activePromptNode.status !== 'generating'"
+      :title="activePromptNode.status === 'generating' ? '停止生成' : '运行当前提示词'"
+      @click="activePromptNode.status === 'generating' ? stopPromptNode(activePromptNode) : runPromptNode(activePromptNode)"
     >
       <LoaderCircle
         v-if="activePromptNode.status === 'generating'"
@@ -1929,7 +2208,7 @@ watch(viewport, scheduleSave, { deep: true });
         v-else
         class="h-4 w-4"
       />
-      <span>{{ activePromptNode.status === "generating" ? "生成中" : "生成" }}</span>
+      <span>{{ activePromptNode.status === "generating" ? "停止" : "生成" }}</span>
     </button>
 
     <button
@@ -2560,6 +2839,39 @@ watch(viewport, scheduleSave, { deep: true });
   color: hsl(var(--muted-foreground));
 }
 
+.canvas-node-icon-button--active {
+  border-color: hsl(var(--foreground) / 0.35);
+  background: hsl(var(--selection));
+  color: hsl(var(--foreground));
+}
+
+.canvas-node-icon-button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.canvas-links {
+  position: absolute;
+  inset: 0;
+  width: 6000px;
+  height: 4200px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.canvas-link-path {
+  fill: none;
+  stroke: hsl(var(--system));
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 6px hsl(var(--system) / 0.28));
+}
+
+.canvas-link-arrow {
+  fill: hsl(var(--system));
+}
+
 .canvas-prompt-body {
   position: relative;
   display: flex;
@@ -2792,6 +3104,56 @@ watch(viewport, scheduleSave, { deep: true });
   max-width: calc(100vw - 6rem);
   border-radius: calc(var(--radius) - 2px);
   object-fit: contain;
+}
+
+.canvas-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: hsl(var(--background) / 0.42);
+  padding: 1rem;
+  backdrop-filter: blur(14px);
+}
+
+.canvas-dialog {
+  display: flex;
+  width: min(26rem, 100%);
+  flex-direction: column;
+  gap: 0.875rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--card));
+  padding: 0.875rem;
+  box-shadow: 0 20px 60px hsl(0 0% 0% / 0.28);
+}
+
+.canvas-dialog-head,
+.canvas-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.canvas-dialog-input {
+  height: 2.5rem;
+  width: 100%;
+  border: 1px solid hsl(var(--input));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--background));
+  padding: 0 0.75rem;
+  color: hsl(var(--foreground));
+  font-size: 0.875rem;
+  font-weight: 650;
+  outline: none;
+}
+
+.canvas-dialog-input:focus {
+  border-color: hsl(var(--ring) / 0.55);
+  box-shadow: 0 0 0 3px hsl(var(--ring) / 0.12);
 }
 
 @media (max-width: 860px) {
