@@ -1,15 +1,27 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
+  Check,
+  Clipboard,
+  Copy,
   Download,
+  FileDown,
+  FileUp,
+  FolderOpen,
+  History,
   Image as ImageIcon,
   ImagePlus,
   Layers,
+  Library,
   LoaderCircle,
   LocateFixed,
+  Maximize2,
   Minus,
   MousePointer2,
+  PanelRightOpen,
+  Pencil,
   Plus,
+  Save,
   Sparkles,
   Trash2,
   Upload,
@@ -52,6 +64,7 @@ interface CanvasNode {
   createdAt: number;
   src?: string;
   prompt?: string;
+  generatedPrompt?: string;
   status?: CanvasNodeStatus;
   error?: string;
 }
@@ -62,18 +75,75 @@ interface Viewport {
   scale: number;
 }
 
-interface PersistedCanvas {
+interface CanvasWorkspace {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
   nodes: CanvasNode[];
   viewport: Viewport;
 }
 
+interface CanvasAssetCategory {
+  id: string;
+  name: string;
+}
+
+interface CanvasAsset {
+  id: string;
+  title: string;
+  src: string;
+  categoryId: string;
+  createdAt: number;
+}
+
+interface CanvasLogEntry {
+  id: string;
+  prompt: string;
+  model: ImageModelId;
+  sourceCount: number;
+  createdAt: number;
+  generationTime: number;
+  status: "success" | "failed";
+  resultImages: string[];
+  error?: string;
+}
+
+interface PersistedCanvas {
+  version?: number;
+  workspaces?: CanvasWorkspace[];
+  activeWorkspaceId?: string;
+  nodes?: CanvasNode[];
+  viewport?: Viewport;
+  assets?: CanvasAsset[];
+  assetCategories?: CanvasAssetCategory[];
+  logs?: CanvasLogEntry[];
+}
+
 interface DragState {
-  type: "pan" | "node";
+  type: "pan" | "node" | "resize";
   nodeId?: string;
   startClientX: number;
   startClientY: number;
   startX: number;
   startY: number;
+  startWidth?: number;
+  startHeight?: number;
+  nodeStartPositions?: Record<string, { x: number; y: number }>;
+}
+
+interface MentionState {
+  nodeId: string;
+  query: string;
+  start: number;
+  end: number;
+}
+
+interface MentionCandidate {
+  id: string;
+  title: string;
+  src: string;
+  source: "canvas" | "asset";
 }
 
 const store = useAppStore();
@@ -85,11 +155,27 @@ const MAX_ZOOM = 2.2;
 
 const boardRef = ref<HTMLElement | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
+const importInput = ref<HTMLInputElement | null>(null);
 const nodes = ref<CanvasNode[]>([]);
 const selectedIds = ref<string[]>([]);
 const viewport = ref<Viewport>({ x: 0, y: 0, scale: 0.86 });
 const dragState = ref<DragState | null>(null);
 const savingFailed = ref(false);
+const workspaces = ref<CanvasWorkspace[]>([]);
+const activeWorkspaceId = ref("");
+const assets = ref<CanvasAsset[]>([]);
+const assetCategories = ref<CanvasAssetCategory[]>([
+  { id: "library", name: "资产库" },
+  { id: "references", name: "参考图" },
+]);
+const activeAssetCategoryId = ref("library");
+const logs = ref<CanvasLogEntry[]>([]);
+const showCanvasPanel = ref(false);
+const showAssetPanel = ref(true);
+const showLogPanel = ref(false);
+const previewNode = ref<CanvasNode | null>(null);
+const mentionState = ref<MentionState | null>(null);
+const nodeClipboard = ref<CanvasNode[]>([]);
 
 let saveTimer: number | undefined;
 
@@ -109,6 +195,33 @@ const activeImageConfig = computed<ImageConfigRecord>(() => ({
 const activeUploadLimit = computed(() => IMAGE_UPLOAD_LIMITS[activeImageModelId.value] ?? 1);
 const selectedNodes = computed(() => nodes.value.filter((node) => selectedIds.value.includes(node.id)));
 const selectedImageNodes = computed(() => selectedNodes.value.filter((node) => node.kind === "image" && node.src));
+const activeWorkspace = computed(
+  () => workspaces.value.find((workspace) => workspace.id === activeWorkspaceId.value) ?? workspaces.value[0] ?? null,
+);
+const visibleAssets = computed(() =>
+  assets.value.filter((asset) => asset.categoryId === activeAssetCategoryId.value),
+);
+const mentionCandidates = computed<MentionCandidate[]>(() => {
+  const query = mentionState.value?.query.trim().toLowerCase() ?? "";
+  const canvasItems = nodes.value
+    .filter((node) => node.kind === "image" && node.src)
+    .map((node) => ({
+      id: node.id,
+      title: node.title,
+      src: node.src || "",
+      source: "canvas" as const,
+    }));
+  const assetItems = assets.value.map((asset) => ({
+    id: asset.id,
+    title: asset.title,
+    src: asset.src,
+    source: "asset" as const,
+  }));
+
+  return [...canvasItems, ...assetItems]
+    .filter((item) => !query || item.title.toLowerCase().includes(query))
+    .slice(0, 8);
+});
 const activePromptNode = computed(() => {
   const selectedPrompt = selectedNodes.value.find((node) => node.kind === "prompt");
   return selectedPrompt ?? nodes.value.find((node) => node.kind === "prompt") ?? null;
@@ -125,6 +238,8 @@ const selectionLabel = computed(() => {
   }
   return "未选择";
 });
+const activeWorkspaceTitle = computed(() => activeWorkspace.value?.title ?? "无限画布");
+const currentWorkspaceUpdatedAt = computed(() => formatTime(activeWorkspace.value?.updatedAt ?? Date.now()));
 
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -132,6 +247,35 @@ function createId(prefix: string) {
   }
 
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function cloneNodes(value: CanvasNode[]) {
+  return JSON.parse(JSON.stringify(value)) as CanvasNode[];
+}
+
+function cloneViewport(value: Viewport) {
+  return { x: value.x, y: value.y, scale: value.scale };
+}
+
+function formatTime(value: number) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function createWorkspace(title = "无限画布", initialNodes?: CanvasNode[]): CanvasWorkspace {
+  const now = Date.now();
+  return {
+    id: createId("canvas"),
+    title,
+    createdAt: now,
+    updatedAt: now,
+    nodes: cloneNodes(initialNodes ?? [createPromptNode(-170, -110)]),
+    viewport: { x: 0, y: 0, scale: 0.86 },
+  };
 }
 
 function createPromptNode(x: number, y: number): CanvasNode {
@@ -170,7 +314,7 @@ function isPersistedCanvas(value: unknown): value is PersistedCanvas {
   }
 
   const record = value as Partial<PersistedCanvas>;
-  return Array.isArray(record.nodes) && Boolean(record.viewport);
+  return Array.isArray(record.workspaces) || Array.isArray(record.nodes);
 }
 
 function loadCanvas() {
@@ -179,33 +323,75 @@ function loadCanvas() {
     if (raw) {
       const parsed = JSON.parse(raw) as unknown;
       if (isPersistedCanvas(parsed)) {
-        nodes.value = parsed.nodes.filter((node) => node.kind === "image" || node.kind === "prompt");
-        viewport.value = {
-          x: Number(parsed.viewport.x || 0),
-          y: Number(parsed.viewport.y || 0),
-          scale: clampNumber(Number(parsed.viewport.scale || 0.86), MIN_ZOOM, MAX_ZOOM),
-        };
+        if (Array.isArray(parsed.workspaces) && parsed.workspaces.length > 0) {
+          workspaces.value = parsed.workspaces.map((workspace) => ({
+            ...workspace,
+            nodes: (workspace.nodes || []).filter((node) => node.kind === "image" || node.kind === "prompt"),
+            viewport: {
+              x: Number(workspace.viewport?.x || 0),
+              y: Number(workspace.viewport?.y || 0),
+              scale: clampNumber(Number(workspace.viewport?.scale || 0.86), MIN_ZOOM, MAX_ZOOM),
+            },
+          }));
+          activeWorkspaceId.value = parsed.activeWorkspaceId || workspaces.value[0].id;
+        } else {
+          const legacyNodes = (parsed.nodes || []).filter((node) => node.kind === "image" || node.kind === "prompt");
+          const workspace = createWorkspace("无限画布", legacyNodes.length ? legacyNodes : undefined);
+          workspace.viewport = {
+            x: Number(parsed.viewport?.x || 0),
+            y: Number(parsed.viewport?.y || 0),
+            scale: clampNumber(Number(parsed.viewport?.scale || 0.86), MIN_ZOOM, MAX_ZOOM),
+          };
+          workspaces.value = [workspace];
+          activeWorkspaceId.value = workspace.id;
+        }
+
+        assets.value = Array.isArray(parsed.assets) ? parsed.assets.filter((asset) => asset.src) : [];
+        if (Array.isArray(parsed.assetCategories) && parsed.assetCategories.length > 0) {
+          assetCategories.value = parsed.assetCategories;
+          activeAssetCategoryId.value = parsed.assetCategories[0].id;
+        }
+        logs.value = Array.isArray(parsed.logs) ? parsed.logs.slice(0, 100) : [];
       }
     }
   } catch {
-    nodes.value = [];
+    workspaces.value = [];
   }
 
-  if (nodes.value.length === 0) {
-    nodes.value = [createPromptNode(-170, -110)];
+  if (workspaces.value.length === 0) {
+    const workspace = createWorkspace();
+    workspaces.value = [workspace];
+    activeWorkspaceId.value = workspace.id;
   }
+
+  openWorkspace(activeWorkspaceId.value || workspaces.value[0].id, false);
+}
+
+function syncActiveWorkspace() {
+  const workspace = activeWorkspace.value;
+  if (!workspace) {
+    return;
+  }
+  workspace.nodes = cloneNodes(nodes.value);
+  workspace.viewport = cloneViewport(viewport.value);
+  workspace.updatedAt = Date.now();
 }
 
 function saveCanvas() {
   window.clearTimeout(saveTimer);
   saveTimer = undefined;
+  syncActiveWorkspace();
 
   try {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        nodes: nodes.value,
-        viewport: viewport.value,
+        version: 2,
+        workspaces: workspaces.value,
+        activeWorkspaceId: activeWorkspaceId.value,
+        assets: assets.value,
+        assetCategories: assetCategories.value,
+        logs: logs.value.slice(0, 100),
       } satisfies PersistedCanvas),
     );
     savingFailed.value = false;
@@ -219,6 +405,54 @@ function scheduleSave() {
   saveTimer = window.setTimeout(saveCanvas, 250);
 }
 
+function openWorkspace(workspaceId: string, shouldSync = true) {
+  if (shouldSync) {
+    syncActiveWorkspace();
+  }
+  const workspace = workspaces.value.find((item) => item.id === workspaceId) ?? workspaces.value[0];
+  if (!workspace) {
+    return;
+  }
+  activeWorkspaceId.value = workspace.id;
+  nodes.value = cloneNodes(workspace.nodes);
+  viewport.value = cloneViewport(workspace.viewport);
+  selectedIds.value = [];
+  mentionState.value = null;
+  showCanvasPanel.value = false;
+  scheduleSave();
+}
+
+function addWorkspace(kind: "classic" | "smart" = "smart") {
+  syncActiveWorkspace();
+  const title = kind === "smart" ? "智能画布" : "无限画布";
+  const workspace = createWorkspace(`${title} ${workspaces.value.length + 1}`);
+  workspaces.value = [workspace, ...workspaces.value];
+  openWorkspace(workspace.id, false);
+  nextTick(fitView);
+}
+
+function renameActiveWorkspace(value: string) {
+  const workspace = activeWorkspace.value;
+  if (!workspace) {
+    return;
+  }
+  workspace.title = value.trim().slice(0, 80) || "未命名画布";
+  scheduleSave();
+}
+
+function removeWorkspace(workspaceId: string) {
+  const next = workspaces.value.filter((workspace) => workspace.id !== workspaceId);
+  if (next.length === 0) {
+    next.push(createWorkspace());
+  }
+  workspaces.value = next;
+  if (activeWorkspaceId.value === workspaceId) {
+    openWorkspace(next[0].id, false);
+  } else {
+    scheduleSave();
+  }
+}
+
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
@@ -228,7 +462,7 @@ function nodeStyle(node: CanvasNode) {
     left: `${node.x}px`,
     top: `${node.y}px`,
     width: `${node.width}px`,
-    minHeight: `${node.height}px`,
+    height: `${node.height}px`,
   };
 }
 
@@ -289,6 +523,63 @@ function removeNode(nodeId: string) {
   scheduleSave();
 }
 
+function removeSelectedNodes() {
+  if (selectedIds.value.length === 0) {
+    return;
+  }
+  nodes.value = nodes.value.filter((node) => !selectedIds.value.includes(node.id));
+  selectedIds.value = [];
+  if (nodes.value.length === 0) {
+    addPromptNode();
+  }
+  scheduleSave();
+}
+
+function duplicateSelectedNodes() {
+  const selected = selectedNodes.value;
+  if (!selected.length) {
+    return;
+  }
+  const copies = selected.map((node) => ({
+    ...JSON.parse(JSON.stringify(node)),
+    id: createId(node.kind),
+    x: node.x + 36,
+    y: node.y + 36,
+    title: `${node.title} 副本`,
+    status: node.kind === "prompt" ? "idle" : node.status,
+    error: "",
+    createdAt: Date.now(),
+  })) as CanvasNode[];
+  nodes.value = [...nodes.value, ...copies];
+  selectedIds.value = copies.map((node) => node.id);
+  scheduleSave();
+}
+
+function copySelectedNodes() {
+  nodeClipboard.value = cloneNodes(selectedNodes.value);
+}
+
+function pasteCopiedNodes() {
+  if (!nodeClipboard.value.length) {
+    return;
+  }
+  const center = boardCenterWorld();
+  const minX = Math.min(...nodeClipboard.value.map((node) => node.x));
+  const minY = Math.min(...nodeClipboard.value.map((node) => node.y));
+  const copies = nodeClipboard.value.map((node) => ({
+    ...JSON.parse(JSON.stringify(node)),
+    id: createId(node.kind),
+    x: Math.round(center.x + (node.x - minX)),
+    y: Math.round(center.y + (node.y - minY)),
+    status: node.kind === "prompt" ? "idle" : node.status,
+    error: "",
+    createdAt: Date.now(),
+  })) as CanvasNode[];
+  nodes.value = [...nodes.value, ...copies];
+  selectedIds.value = copies.map((node) => node.id);
+  scheduleSave();
+}
+
 function clearCanvas() {
   const center = boardCenterWorld();
   const node = createPromptNode(center.x - 165, center.y - 114);
@@ -304,6 +595,55 @@ function updateNodePrompt(node: CanvasNode, value: string) {
     node.error = "";
   }
   scheduleSave();
+}
+
+function handlePromptInput(node: CanvasNode, event: Event) {
+  const target = event.target as HTMLTextAreaElement;
+  updateNodePrompt(node, target.value);
+  const beforeCursor = target.value.slice(0, target.selectionStart ?? target.value.length);
+  const match = beforeCursor.match(/(?:^|\s)@([^\s@\[\]]{0,32})$/);
+  if (!match) {
+    mentionState.value = null;
+    return;
+  }
+  mentionState.value = {
+    nodeId: node.id,
+    query: match[1] || "",
+    start: beforeCursor.length - (match[1] || "").length - 1,
+    end: beforeCursor.length,
+  };
+}
+
+function insertMention(node: CanvasNode, candidate: MentionCandidate) {
+  const state = mentionState.value;
+  if (!state || state.nodeId !== node.id) {
+    node.prompt = `${node.prompt || ""} @[${candidate.title}] `;
+    scheduleSave();
+    return;
+  }
+  const prompt = node.prompt || "";
+  node.prompt = `${prompt.slice(0, state.start)}@[${candidate.title}] ${prompt.slice(state.end)}`;
+  mentionState.value = null;
+  scheduleSave();
+}
+
+function normalizeMentionTitle(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function parseMentionTitles(prompt: string) {
+  const titles = new Set<string>();
+  for (const match of prompt.matchAll(/@\[([^\]]+)\]/g)) {
+    titles.add(normalizeMentionTitle(match[1]));
+  }
+  for (const match of prompt.matchAll(/(?:^|\s)@([^\s@\[\]]+)/g)) {
+    titles.add(normalizeMentionTitle(match[1]));
+  }
+  return titles;
+}
+
+function cleanPromptForGeneration(prompt: string) {
+  return prompt.replace(/@\[([^\]]+)\]/g, "参考图").replace(/(?:^|\s)@([^\s@\[\]]+)/g, " 参考图").trim();
 }
 
 function setImageModel(value: string) {
@@ -351,6 +691,55 @@ async function addImageFiles(files: FileList | File[] | null, point = boardCente
   scheduleSave();
 }
 
+function addAsset(src: string, title: string, categoryId = activeAssetCategoryId.value) {
+  const asset: CanvasAsset = {
+    id: createId("asset"),
+    title: title.trim() || `图片 ${assets.value.length + 1}`,
+    src,
+    categoryId,
+    createdAt: Date.now(),
+  };
+  assets.value = [asset, ...assets.value];
+  scheduleSave();
+  return asset;
+}
+
+async function addAssetFiles(files: FileList | File[] | null) {
+  const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
+  for (const file of imageFiles) {
+    addAsset(await readFileAsDataUrl(file), file.name || "粘贴图片");
+  }
+}
+
+function addSelectedImagesToAssets() {
+  for (const node of selectedImageNodes.value) {
+    if (node.src) {
+      addAsset(node.src, node.title, "references");
+    }
+  }
+}
+
+function removeAsset(assetId: string) {
+  assets.value = assets.value.filter((asset) => asset.id !== assetId);
+  scheduleSave();
+}
+
+function addAssetToCanvas(asset: CanvasAsset) {
+  const center = boardCenterWorld();
+  addImageNode(asset.src, asset.title, center.x - 150, center.y - 135);
+}
+
+function createAssetCategory() {
+  const name = window.prompt("新资产文件夹名称", "新文件夹");
+  if (!name?.trim()) {
+    return;
+  }
+  const category = { id: createId("asset-category"), name: name.trim().slice(0, 40) };
+  assetCategories.value = [...assetCategories.value, category];
+  activeAssetCategoryId.value = category.id;
+  scheduleSave();
+}
+
 async function handleImageInput(event: Event) {
   const target = event.target as HTMLInputElement;
   await addImageFiles(target.files);
@@ -367,6 +756,11 @@ async function handleDrop(event: DragEvent) {
   await addImageFiles(event.dataTransfer?.files ?? null, point);
 }
 
+async function handleAssetDrop(event: DragEvent) {
+  event.preventDefault();
+  await addAssetFiles(event.dataTransfer?.files ?? null);
+}
+
 async function handlePaste(event: ClipboardEvent) {
   if (!event.clipboardData) {
     return;
@@ -377,9 +771,8 @@ async function handlePaste(event: ClipboardEvent) {
     return;
   }
 
-  if (document.activeElement && ["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) {
-    return;
-  }
+  event.preventDefault();
+  event.stopPropagation();
 
   await addImageFiles(files);
 }
@@ -417,6 +810,7 @@ function startNodeDrag(event: PointerEvent, node: CanvasNode) {
   }
 
   selectNode(node.id, event.shiftKey || event.ctrlKey || event.metaKey);
+  const movingIds = selectedIds.value.includes(node.id) ? selectedIds.value : [node.id];
   dragState.value = {
     type: "node",
     nodeId: node.id,
@@ -424,6 +818,29 @@ function startNodeDrag(event: PointerEvent, node: CanvasNode) {
     startClientY: event.clientY,
     startX: node.x,
     startY: node.y,
+    nodeStartPositions: Object.fromEntries(
+      nodes.value
+        .filter((item) => movingIds.includes(item.id))
+        .map((item) => [item.id, { x: item.x, y: item.y }]),
+    ),
+  };
+  window.addEventListener("pointermove", handlePointerMove);
+  window.addEventListener("pointerup", finishPointerAction, { once: true });
+}
+
+function startNodeResize(event: PointerEvent, node: CanvasNode) {
+  event.stopPropagation();
+  event.preventDefault();
+  selectNode(node.id);
+  dragState.value = {
+    type: "resize",
+    nodeId: node.id,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    startX: node.x,
+    startY: node.y,
+    startWidth: node.width,
+    startHeight: node.height,
   };
   window.addEventListener("pointermove", handlePointerMove);
   window.addEventListener("pointerup", finishPointerAction, { once: true });
@@ -451,8 +868,21 @@ function handlePointerMove(event: PointerEvent) {
     return;
   }
 
-  node.x = Math.round(state.startX + dx / viewport.value.scale);
-  node.y = Math.round(state.startY + dy / viewport.value.scale);
+  if (state.type === "resize") {
+    node.width = Math.round(clampNumber((state.startWidth || node.width) + dx / viewport.value.scale, 220, 980));
+    node.height = Math.round(clampNumber((state.startHeight || node.height) + dy / viewport.value.scale, 160, 860));
+    return;
+  }
+
+  const startPositions = state.nodeStartPositions || { [node.id]: { x: state.startX, y: state.startY } };
+  for (const item of nodes.value) {
+    const start = startPositions[item.id];
+    if (!start) {
+      continue;
+    }
+    item.x = Math.round(start.x + dx / viewport.value.scale);
+    item.y = Math.round(start.y + dy / viewport.value.scale);
+  }
 }
 
 function finishPointerAction() {
@@ -546,10 +976,19 @@ async function sourceToDataUrl(source: string): Promise<string> {
 }
 
 async function buildSourceImages(node: CanvasNode) {
-  const sources = selectedImageNodes.value
-    .filter((sourceNode) => sourceNode.id !== node.id)
-    .slice(0, activeUploadLimit.value)
+  const mentionTitles = parseMentionTitles(node.prompt || "");
+  const mentionedNodeSources = nodes.value
+    .filter((sourceNode) => sourceNode.kind === "image" && sourceNode.src && mentionTitles.has(normalizeMentionTitle(sourceNode.title)))
     .map((sourceNode) => sourceNode.src || "");
+  const mentionedAssetSources = assets.value
+    .filter((asset) => mentionTitles.has(normalizeMentionTitle(asset.title)))
+    .map((asset) => asset.src);
+  const selectedSources = selectedImageNodes.value
+    .filter((sourceNode) => sourceNode.id !== node.id)
+    .map((sourceNode) => sourceNode.src || "");
+  const sources = [...mentionedNodeSources, ...mentionedAssetSources, ...selectedSources]
+    .filter((source, index, list) => Boolean(source) && list.indexOf(source) === index)
+    .slice(0, activeUploadLimit.value);
 
   const resolved: string[] = [];
   for (const source of sources) {
@@ -579,6 +1018,22 @@ function buildCanvasImageTask(
   });
 }
 
+function countNodeReferences(node: CanvasNode) {
+  const mentionTitles = parseMentionTitles(node.prompt || "");
+  const mentioned = [
+    ...nodes.value
+      .filter((sourceNode) => sourceNode.kind === "image" && sourceNode.src && mentionTitles.has(normalizeMentionTitle(sourceNode.title)))
+      .map((sourceNode) => sourceNode.src || ""),
+    ...assets.value
+      .filter((asset) => mentionTitles.has(normalizeMentionTitle(asset.title)))
+      .map((asset) => asset.src),
+  ];
+  const selected = selectedImageNodes.value
+    .filter((sourceNode) => sourceNode.id !== node.id)
+    .map((sourceNode) => sourceNode.src || "");
+  return [...mentioned, ...selected].filter((source, index, list) => Boolean(source) && list.indexOf(source) === index).length;
+}
+
 async function runPromptNode(node: CanvasNode) {
   const prompt = String(node.prompt || "").trim();
   if (!prompt || node.status === "generating") {
@@ -594,11 +1049,12 @@ async function runPromptNode(node: CanvasNode) {
     const model = activeImageModelId.value;
     const config = { ...activeImageConfig.value };
     const sourceImages = await buildSourceImages(node);
-    const task = buildCanvasImageTask(prompt, model, config, sourceImages, startedAt);
+    const generationPrompt = cleanPromptForGeneration(prompt);
+    const task = buildCanvasImageTask(generationPrompt, model, config, sourceImages, startedAt);
     const usesCodexImageKey = model === "codex-image-2";
     const result = await generateImage({
       model,
-      prompt,
+      prompt: generationPrompt,
       sourceImages,
       config,
       apiBaseUrl: usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl,
@@ -612,7 +1068,7 @@ async function runPromptNode(node: CanvasNode) {
         `生成结果 ${index + 1}`,
         node.x + node.width + 56 + index * 38,
         node.y + index * 38,
-      );
+      ).generatedPrompt = generationPrompt;
     });
 
     const finalTask: ImageTask = {
@@ -622,10 +1078,33 @@ async function runPromptNode(node: CanvasNode) {
       generationTime: Date.now() - startedAt,
     };
     await store.addHistoryTask(finalTask);
+    const logEntry: CanvasLogEntry = {
+      id: createId("log"),
+      prompt: generationPrompt,
+      model,
+      sourceCount: sourceImages.length,
+      createdAt: startedAt,
+      generationTime: Date.now() - startedAt,
+      status: "success",
+      resultImages,
+    };
+    logs.value = [logEntry, ...logs.value].slice(0, 100);
     node.status = "success";
   } catch (error) {
     node.status = "error";
     node.error = error instanceof Error ? error.message : "生成失败";
+    const logEntry: CanvasLogEntry = {
+      id: createId("log"),
+      prompt,
+      model: activeImageModelId.value,
+      sourceCount: 0,
+      createdAt: startedAt,
+      generationTime: Date.now() - startedAt,
+      status: "failed",
+      resultImages: [],
+      error: node.error,
+    };
+    logs.value = [logEntry, ...logs.value].slice(0, 100);
   } finally {
     scheduleSave();
   }
@@ -645,8 +1124,123 @@ function downloadImage(node: CanvasNode) {
 }
 
 function openImage(node: CanvasNode) {
-  if (node.src) {
-    window.open(node.src, "_blank", "noopener,noreferrer");
+  previewNode.value = node.src ? node : null;
+}
+
+function downloadJson(filename: string, payload: unknown) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const anchor = document.createElement("a");
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  URL.revokeObjectURL(anchor.href);
+  anchor.remove();
+}
+
+function exportWorkspace() {
+  syncActiveWorkspace();
+  downloadJson(`art-workshop-canvas-${Date.now()}.json`, {
+    version: 2,
+    workspace: activeWorkspace.value,
+    assets: assets.value,
+    assetCategories: assetCategories.value,
+  });
+}
+
+function exportAllCanvases() {
+  syncActiveWorkspace();
+  downloadJson(`art-workshop-canvas-backup-${Date.now()}.json`, {
+    version: 2,
+    workspaces: workspaces.value,
+    activeWorkspaceId: activeWorkspaceId.value,
+    assets: assets.value,
+    assetCategories: assetCategories.value,
+    logs: logs.value,
+  });
+}
+
+function pickImportFile() {
+  importInput.value?.click();
+}
+
+async function handleImportFile(event: Event) {
+  const target = event.target as HTMLInputElement;
+  const file = target.files?.[0];
+  target.value = "";
+  if (!file) {
+    return;
+  }
+  const raw = await file.text();
+  const parsed = JSON.parse(raw) as PersistedCanvas & { workspace?: CanvasWorkspace };
+  syncActiveWorkspace();
+
+  if (parsed.workspace) {
+    const workspace = {
+      ...parsed.workspace,
+      id: createId("canvas"),
+      title: `${parsed.workspace.title || "导入画布"} 导入`,
+      updatedAt: Date.now(),
+    };
+    workspaces.value = [workspace, ...workspaces.value];
+    openWorkspace(workspace.id, false);
+  } else if (Array.isArray(parsed.workspaces) && parsed.workspaces.length) {
+    workspaces.value = parsed.workspaces;
+    activeWorkspaceId.value = parsed.activeWorkspaceId || parsed.workspaces[0].id;
+    openWorkspace(activeWorkspaceId.value, false);
+  }
+
+  if (Array.isArray(parsed.assets)) {
+    assets.value = parsed.assets;
+  }
+  if (Array.isArray(parsed.assetCategories) && parsed.assetCategories.length) {
+    assetCategories.value = parsed.assetCategories;
+    activeAssetCategoryId.value = parsed.assetCategories[0].id;
+  }
+  scheduleSave();
+}
+
+function rerunLog(entry: CanvasLogEntry) {
+  const center = boardCenterWorld();
+  const node = createPromptNode(center.x - 165, center.y - 114);
+  node.prompt = entry.prompt;
+  nodes.value = [...nodes.value, node];
+  selectedIds.value = [node.id];
+  void runPromptNode(node);
+}
+
+async function copyText(value: string) {
+  await navigator.clipboard?.writeText(value);
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  const target = event.target as HTMLElement | null;
+  const isEditing = Boolean(target?.closest("textarea,input,select,[contenteditable='true']"));
+  if (event.key === "Escape") {
+    previewNode.value = null;
+    mentionState.value = null;
+    showCanvasPanel.value = false;
+    showLogPanel.value = false;
+    return;
+  }
+  if (isEditing) {
+    return;
+  }
+  if (event.key === "Delete" || event.key === "Backspace") {
+    removeSelectedNodes();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d") {
+    event.preventDefault();
+    duplicateSelectedNodes();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+    copySelectedNodes();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+    pasteCopiedNodes();
   }
 }
 
@@ -656,12 +1250,14 @@ onMounted(async () => {
   if (!localStorage.getItem(STORAGE_KEY)) {
     fitView();
   }
-  window.addEventListener("paste", handlePaste);
+  window.addEventListener("paste", handlePaste, { capture: true });
+  window.addEventListener("keydown", handleKeydown);
 });
 
 onBeforeUnmount(() => {
   window.clearTimeout(saveTimer);
-  window.removeEventListener("paste", handlePaste);
+  window.removeEventListener("paste", handlePaste, { capture: true });
+  window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("pointermove", handlePointerMove);
 });
 
@@ -679,8 +1275,25 @@ watch(viewport, scheduleSave, { deep: true });
       class="hidden"
       @change="handleImageInput"
     />
+    <input
+      ref="importInput"
+      type="file"
+      accept="application/json,.json"
+      class="hidden"
+      @change="handleImportFile"
+    />
 
     <div class="canvas-toolbar">
+      <button
+        type="button"
+        class="canvas-tool-button"
+        title="画布管理"
+        @click="showCanvasPanel = !showCanvasPanel"
+      >
+        <FolderOpen class="h-4 w-4" />
+        <span>{{ activeWorkspaceTitle }}</span>
+      </button>
+      <div class="canvas-toolbar-separator" />
       <button
         type="button"
         class="canvas-tool-button"
@@ -770,6 +1383,38 @@ watch(viewport, scheduleSave, { deep: true });
       >
         <Trash2 class="h-4 w-4" />
       </button>
+      <button
+        type="button"
+        class="canvas-icon-button"
+        title="资产库"
+        @click="showAssetPanel = !showAssetPanel"
+      >
+        <Library class="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        class="canvas-icon-button"
+        title="生成日志"
+        @click="showLogPanel = !showLogPanel"
+      >
+        <History class="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        class="canvas-icon-button"
+        title="导入画布"
+        @click="pickImportFile"
+      >
+        <FileUp class="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        class="canvas-icon-button"
+        title="导出画布"
+        @click="exportWorkspace"
+      >
+        <FileDown class="h-4 w-4" />
+      </button>
     </div>
 
     <div class="canvas-status">
@@ -777,11 +1422,234 @@ watch(viewport, scheduleSave, { deep: true });
       <span>{{ selectionLabel }}</span>
       <span class="canvas-status-dot" />
       <span>{{ Math.round(viewport.scale * 100) }}%</span>
+      <span class="canvas-status-dot" />
+      <span>{{ currentWorkspaceUpdatedAt }}</span>
       <template v-if="savingFailed">
         <span class="canvas-status-dot" />
         <span class="canvas-status-error">保存失败</span>
       </template>
     </div>
+
+    <aside
+      v-if="showCanvasPanel"
+      class="canvas-side-panel canvas-side-panel--left"
+    >
+      <header class="canvas-panel-head">
+        <div>
+          <div class="canvas-panel-title">画布</div>
+          <div class="canvas-panel-subtitle">{{ workspaces.length }} 个工作区</div>
+        </div>
+        <button
+          type="button"
+          class="canvas-node-icon-button"
+          title="关闭"
+          @click="showCanvasPanel = false"
+        >
+          <X class="h-3.5 w-3.5" />
+        </button>
+      </header>
+      <input
+        :value="activeWorkspaceTitle"
+        class="canvas-title-input"
+        maxlength="80"
+        @input="renameActiveWorkspace(($event.target as HTMLInputElement).value)"
+      />
+      <div class="canvas-panel-actions">
+        <button
+          type="button"
+          class="canvas-tool-button"
+          @click="addWorkspace('smart')"
+        >
+          <Sparkles class="h-4 w-4" />
+          <span>新建智能画布</span>
+        </button>
+        <button
+          type="button"
+          class="canvas-tool-button"
+          @click="exportAllCanvases"
+        >
+          <Save class="h-4 w-4" />
+          <span>备份全部</span>
+        </button>
+      </div>
+      <div class="canvas-workspace-list">
+        <article
+          v-for="workspace in workspaces"
+          :key="workspace.id"
+          class="canvas-workspace-card"
+          :class="workspace.id === activeWorkspaceId ? 'canvas-workspace-card--active' : ''"
+        >
+          <button
+            type="button"
+            class="canvas-workspace-open"
+            @click="openWorkspace(workspace.id)"
+          >
+            <Layers class="h-4 w-4" />
+            <span class="canvas-workspace-card-title">{{ workspace.title }}</span>
+            <span class="canvas-workspace-card-time">{{ formatTime(workspace.updatedAt) }}</span>
+          </button>
+          <button
+            type="button"
+            class="canvas-node-icon-button"
+            title="删除画布"
+            @click="removeWorkspace(workspace.id)"
+          >
+            <Trash2 class="h-3.5 w-3.5" />
+          </button>
+        </article>
+      </div>
+    </aside>
+
+    <aside
+      v-if="showAssetPanel"
+      class="canvas-side-panel canvas-side-panel--right"
+      @dragover.prevent
+      @drop="handleAssetDrop"
+    >
+      <header class="canvas-panel-head">
+        <div>
+          <div class="canvas-panel-title">资产库</div>
+          <div class="canvas-panel-subtitle">保存图片，输入 @ 可引用</div>
+        </div>
+        <button
+          type="button"
+          class="canvas-node-icon-button"
+          title="关闭"
+          @click="showAssetPanel = false"
+        >
+          <X class="h-3.5 w-3.5" />
+        </button>
+      </header>
+      <div class="canvas-panel-actions">
+        <select
+          v-model="activeAssetCategoryId"
+          class="canvas-select canvas-asset-select"
+        >
+          <option
+            v-for="category in assetCategories"
+            :key="category.id"
+            :value="category.id"
+          >
+            {{ category.name }}
+          </option>
+        </select>
+        <button
+          type="button"
+          class="canvas-icon-button"
+          title="新增文件夹"
+          @click="createAssetCategory"
+        >
+          <Plus class="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          class="canvas-icon-button"
+          title="把选中图片保存为资产"
+          :disabled="selectedImageNodes.length === 0"
+          @click="addSelectedImagesToAssets"
+        >
+          <Clipboard class="h-4 w-4" />
+        </button>
+      </div>
+      <div class="canvas-asset-drop">拖图片到这里保存，也可以粘贴到画布</div>
+      <div class="canvas-asset-grid">
+        <article
+          v-for="asset in visibleAssets"
+          :key="asset.id"
+          class="canvas-asset-card"
+        >
+          <button
+            type="button"
+            class="canvas-asset-thumb"
+            title="放到画布"
+            @click="addAssetToCanvas(asset)"
+          >
+            <img
+              :src="asset.src"
+              :alt="asset.title"
+            />
+          </button>
+          <div class="canvas-asset-meta">
+            <span>{{ asset.title }}</span>
+            <button
+              type="button"
+              class="canvas-node-icon-button"
+              title="删除资产"
+              @click="removeAsset(asset.id)"
+            >
+              <X class="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <button
+            v-if="activePromptNode"
+            type="button"
+            class="canvas-asset-reference"
+            @click="insertMention(activePromptNode, { id: asset.id, title: asset.title, src: asset.src, source: 'asset' })"
+          >
+            @图片
+          </button>
+        </article>
+      </div>
+    </aside>
+
+    <aside
+      v-if="showLogPanel"
+      class="canvas-side-panel canvas-side-panel--logs"
+    >
+      <header class="canvas-panel-head">
+        <div>
+          <div class="canvas-panel-title">生成日志</div>
+          <div class="canvas-panel-subtitle">{{ logs.length }} 条记录</div>
+        </div>
+        <button
+          type="button"
+          class="canvas-node-icon-button"
+          title="关闭"
+          @click="showLogPanel = false"
+        >
+          <X class="h-3.5 w-3.5" />
+        </button>
+      </header>
+      <div class="canvas-log-list">
+        <article
+          v-for="entry in logs"
+          :key="entry.id"
+          class="canvas-log-card"
+          :class="entry.status === 'failed' ? 'canvas-log-card--failed' : ''"
+        >
+          <div class="canvas-log-prompt">{{ entry.prompt }}</div>
+          <div class="canvas-log-meta">
+            <span>{{ formatTime(entry.createdAt) }}</span>
+            <span>{{ entry.sourceCount }} 张参考</span>
+            <span>{{ Math.round(entry.generationTime / 1000) }}s</span>
+          </div>
+          <div class="canvas-panel-actions">
+            <button
+              type="button"
+              class="canvas-tool-button"
+              @click="copyText(entry.prompt)"
+            >
+              <Copy class="h-4 w-4" />
+              <span>复制</span>
+            </button>
+            <button
+              type="button"
+              class="canvas-tool-button"
+              @click="rerunLog(entry)"
+            >
+              <Sparkles class="h-4 w-4" />
+              <span>重跑</span>
+            </button>
+          </div>
+          <p
+            v-if="entry.error"
+            class="canvas-node-error"
+          >
+            {{ entry.error }}
+          </p>
+        </article>
+      </div>
+    </aside>
 
     <div
       ref="boardRef"
@@ -823,6 +1691,23 @@ watch(viewport, scheduleSave, { deep: true });
             </span>
             <span class="canvas-node-actions">
               <button
+                type="button"
+                class="canvas-node-icon-button"
+                title="复制节点"
+                @click.stop="selectedIds = [node.id]; duplicateSelectedNodes()"
+              >
+                <Copy class="h-3.5 w-3.5" />
+              </button>
+              <button
+                v-if="node.kind === 'image' && node.src"
+                type="button"
+                class="canvas-node-icon-button"
+                title="存入资产库"
+                @click.stop="addAsset(node.src, node.title, 'references')"
+              >
+                <Library class="h-3.5 w-3.5" />
+              </button>
+              <button
                 v-if="node.kind === 'image'"
                 type="button"
                 class="canvas-node-icon-button"
@@ -849,12 +1734,33 @@ watch(viewport, scheduleSave, { deep: true });
             <textarea
               :value="node.prompt"
               class="canvas-prompt-textarea"
-              placeholder="输入提示词，生成图片..."
-              @input="updateNodePrompt(node, ($event.target as HTMLTextAreaElement).value)"
+              placeholder="输入提示词，生成图片；输入 @ 可引用画布图片或资产..."
+              @input="handlePromptInput(node, $event)"
+              @focus="handlePromptInput(node, $event)"
               @pointerdown.stop
             />
+            <div
+              v-if="mentionState?.nodeId === node.id && mentionCandidates.length > 0"
+              class="canvas-mention-popover"
+              @pointerdown.stop
+            >
+              <button
+                v-for="candidate in mentionCandidates"
+                :key="`${candidate.source}-${candidate.id}`"
+                type="button"
+                class="canvas-mention-item"
+                @click.stop="insertMention(node, candidate)"
+              >
+                <img
+                  :src="candidate.src"
+                  :alt="candidate.title"
+                />
+                <span>{{ candidate.title }}</span>
+                <small>{{ candidate.source === "asset" ? "资产" : "画布" }}</small>
+              </button>
+            </div>
             <div class="canvas-prompt-footer">
-              <span class="canvas-reference-pill">{{ selectedImageNodes.length }} 张参考</span>
+              <span class="canvas-reference-pill">{{ countNodeReferences(node) }} 张参考</span>
               <button
                 type="button"
                 class="canvas-generate-button"
@@ -900,6 +1806,14 @@ watch(viewport, scheduleSave, { deep: true });
               class="h-8 w-8 text-muted-foreground/50"
             />
           </button>
+          <button
+            type="button"
+            class="canvas-resize-handle"
+            title="调整大小"
+            @pointerdown="startNodeResize($event, node)"
+          >
+            <Maximize2 class="h-3.5 w-3.5" />
+          </button>
         </article>
       </div>
     </div>
@@ -931,6 +1845,52 @@ watch(viewport, scheduleSave, { deep: true });
     >
       <ImagePlus class="h-5 w-5" />
     </button>
+
+    <div
+      v-if="previewNode"
+      class="canvas-preview-backdrop"
+      @click="previewNode = null"
+    >
+      <div
+        class="canvas-preview-panel"
+        @click.stop
+      >
+        <header class="canvas-preview-head">
+          <div>
+            <div class="canvas-panel-title">{{ previewNode.title }}</div>
+            <div
+              v-if="previewNode.generatedPrompt"
+              class="canvas-panel-subtitle"
+            >
+              {{ previewNode.generatedPrompt }}
+            </div>
+          </div>
+          <div class="canvas-panel-actions">
+            <button
+              type="button"
+              class="canvas-icon-button"
+              title="下载"
+              @click="downloadImage(previewNode)"
+            >
+              <Download class="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              class="canvas-icon-button"
+              title="关闭"
+              @click="previewNode = null"
+            >
+              <X class="h-4 w-4" />
+            </button>
+          </div>
+        </header>
+        <img
+          :src="previewNode.src"
+          :alt="previewNode.title"
+          class="canvas-preview-image"
+        />
+      </div>
+    </div>
   </section>
 </template>
 
@@ -1104,6 +2064,253 @@ watch(viewport, scheduleSave, { deep: true });
   color: hsl(var(--destructive));
 }
 
+.canvas-side-panel {
+  position: absolute;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: min(20rem, calc(100% - 2rem));
+  max-height: calc(100% - 7rem);
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--card) / 0.94);
+  padding: 0.75rem;
+  box-shadow: 0 18px 48px hsl(0 0% 0% / 0.22);
+  backdrop-filter: blur(18px);
+}
+
+.canvas-side-panel--left {
+  left: 1rem;
+  top: 4.25rem;
+}
+
+.canvas-side-panel--right {
+  right: 1rem;
+  top: 4.25rem;
+  bottom: 4.5rem;
+}
+
+.canvas-side-panel--logs {
+  right: 1rem;
+  top: 4.25rem;
+  bottom: 4.5rem;
+}
+
+.canvas-panel-head,
+.canvas-panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.canvas-panel-title {
+  color: hsl(var(--foreground));
+  font-size: 0.875rem;
+  font-weight: 800;
+}
+
+.canvas-panel-subtitle {
+  margin-top: 0.125rem;
+  max-width: 14rem;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-title-input {
+  height: 2.25rem;
+  width: 100%;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--background));
+  padding: 0 0.625rem;
+  color: hsl(var(--foreground));
+  font-size: 0.8125rem;
+  font-weight: 700;
+  outline: none;
+}
+
+.canvas-workspace-list,
+.canvas-log-list {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow: auto;
+}
+
+.canvas-workspace-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.375rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--background));
+  padding: 0.375rem;
+}
+
+.canvas-workspace-card--active {
+  border-color: hsl(var(--foreground) / 0.5);
+}
+
+.canvas-workspace-open {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.125rem 0.5rem;
+  text-align: left;
+}
+
+.canvas-workspace-open svg {
+  grid-row: span 2;
+  align-self: center;
+  color: hsl(var(--muted-foreground));
+}
+
+.canvas-workspace-card-title,
+.canvas-workspace-card-time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-workspace-card-title {
+  color: hsl(var(--foreground));
+  font-size: 0.8125rem;
+  font-weight: 750;
+}
+
+.canvas-workspace-card-time {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 600;
+}
+
+.canvas-asset-select {
+  max-width: 10rem;
+  height: 2rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--background));
+  padding: 0 0.5rem;
+}
+
+.canvas-asset-drop {
+  display: flex;
+  min-height: 3rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.canvas-asset-grid {
+  display: grid;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+  overflow: auto;
+}
+
+.canvas-asset-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--background));
+}
+
+.canvas-asset-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: hsl(var(--muted) / 0.35);
+}
+
+.canvas-asset-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.canvas-asset-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.25rem;
+  padding: 0.375rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
+.canvas-asset-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-asset-reference {
+  position: absolute;
+  left: 0.375rem;
+  top: 0.375rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 9999px;
+  background: hsl(var(--card) / 0.9);
+  padding: 0.1875rem 0.5rem;
+  color: hsl(var(--foreground));
+  font-size: 0.6875rem;
+  font-weight: 800;
+  backdrop-filter: blur(10px);
+}
+
+.canvas-log-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--background));
+  padding: 0.625rem;
+}
+
+.canvas-log-card--failed {
+  border-color: hsl(var(--destructive) / 0.45);
+}
+
+.canvas-log-prompt {
+  max-height: 5rem;
+  overflow: auto;
+  color: hsl(var(--foreground));
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.canvas-log-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 700;
+}
+
 .canvas-node {
   position: absolute;
   display: flex;
@@ -1169,6 +2376,7 @@ watch(viewport, scheduleSave, { deep: true });
 }
 
 .canvas-prompt-body {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;
@@ -1193,6 +2401,61 @@ watch(viewport, scheduleSave, { deep: true });
 
 .canvas-prompt-textarea:focus {
   border-color: hsl(var(--ring) / 0.5);
+}
+
+.canvas-mention-popover {
+  position: absolute;
+  left: 0.625rem;
+  right: 0.625rem;
+  bottom: 3.25rem;
+  z-index: 4;
+  display: grid;
+  max-height: 15rem;
+  gap: 0.25rem;
+  overflow: auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: calc(var(--radius) - 2px);
+  background: hsl(var(--popover));
+  padding: 0.375rem;
+  box-shadow: 0 14px 34px hsl(0 0% 0% / 0.22);
+}
+
+.canvas-mention-item {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: calc(var(--radius) - 4px);
+  padding: 0.25rem;
+  text-align: left;
+}
+
+.canvas-mention-item:hover {
+  background: hsl(var(--accent));
+}
+
+.canvas-mention-item img {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.375rem;
+  object-fit: cover;
+}
+
+.canvas-mention-item span {
+  min-width: 0;
+  overflow: hidden;
+  color: hsl(var(--foreground));
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-mention-item small {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.6875rem;
+  font-weight: 700;
 }
 
 .canvas-prompt-footer {
@@ -1251,8 +2514,31 @@ watch(viewport, scheduleSave, { deep: true });
   display: block;
   width: 100%;
   height: 100%;
-  min-height: 14.75rem;
   object-fit: contain;
+}
+
+.canvas-resize-handle {
+  position: absolute;
+  right: 0.25rem;
+  bottom: 0.25rem;
+  z-index: 3;
+  display: inline-flex;
+  height: 1.5rem;
+  width: 1.5rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  background: hsl(var(--card) / 0.86);
+  color: hsl(var(--muted-foreground));
+  cursor: nwse-resize;
+  opacity: 0;
+  backdrop-filter: blur(10px);
+}
+
+.canvas-node:hover .canvas-resize-handle,
+.canvas-node--selected .canvas-resize-handle {
+  opacity: 1;
 }
 
 .canvas-floating-generate,
@@ -1281,6 +2567,46 @@ watch(viewport, scheduleSave, { deep: true });
   display: none;
   height: 2.5rem;
   width: 2.5rem;
+}
+
+.canvas-preview-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: hsl(var(--background) / 0.38);
+  padding: 1.5rem;
+  backdrop-filter: blur(16px);
+}
+
+.canvas-preview-panel {
+  display: flex;
+  max-height: 100%;
+  max-width: min(72rem, 100%);
+  flex-direction: column;
+  gap: 0.75rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--card));
+  padding: 0.75rem;
+  box-shadow: 0 20px 64px hsl(0 0% 0% / 0.26);
+}
+
+.canvas-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.canvas-preview-image {
+  display: block;
+  max-height: calc(100dvh - 10rem);
+  max-width: calc(100vw - 6rem);
+  border-radius: calc(var(--radius) - 2px);
+  object-fit: contain;
 }
 
 @media (max-width: 860px) {

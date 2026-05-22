@@ -2649,6 +2649,10 @@ function removeGalleryItem(item: GalleryHistoryItem) {
 }
 
 async function handleGlobalPaste(event: ClipboardEvent) {
+  if (store.generationMode === "canvas") {
+    return;
+  }
+
   const files = Array.from(event.clipboardData?.items || [])
     .filter((item) => item.type.startsWith("image/"))
     .map((item) => item.getAsFile())
