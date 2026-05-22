@@ -1,4 +1,4 @@
-export type GenerationMode = "image" | "video";
+export type GenerationMode = "image" | "video" | "canvas";
 export type ThemeMode = "light" | "dark";
 
 export type ImageModelId =

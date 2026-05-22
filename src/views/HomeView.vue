@@ -10,6 +10,7 @@ import {
   Cpu,
   Download,
   Image as ImageIcon,
+  Infinity as InfinityIcon,
   LoaderCircle,
   Moon,
   Pencil,
@@ -31,6 +32,7 @@ import {
 } from "lucide-vue-next";
 
 import OpenAiIcon from "@/components/icons/OpenAiIcon.vue";
+import InfiniteCanvas from "@/components/InfiniteCanvas.vue";
 import LoadingLottie from "@/components/LoadingLottie.vue";
 import MediaModal from "@/components/MediaModal.vue";
 import MultiAngleThreePreview from "@/components/MultiAngleThreePreview.vue";
@@ -2753,7 +2755,10 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <main class="workspace-main mx-auto max-w-7xl px-4 py-6">
+    <main
+      class="workspace-main mx-auto px-4 py-6"
+      :class="store.generationMode === 'canvas' ? 'max-w-none' : 'max-w-7xl'"
+    >
       <div class="workspace-mode-row mb-6 flex justify-center">
         <div
           class="mode-switch"
@@ -2777,6 +2782,15 @@ onBeforeUnmount(() => {
           >
             <Video class="h-4 w-4" />
             视频
+          </button>
+          <button
+            type="button"
+            class="mode-switch-button"
+            :class="store.generationMode === 'canvas' ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'"
+            @click="store.setGenerationMode('canvas')"
+          >
+            <InfinityIcon class="h-4 w-4" />
+            无限画布
           </button>
         </div>
       </div>
@@ -3346,6 +3360,10 @@ onBeforeUnmount(() => {
           </section>
         </div>
 
+      </template>
+
+      <template v-else-if="store.generationMode === 'canvas'">
+        <InfiniteCanvas />
       </template>
 
       <template v-else>
@@ -4362,9 +4380,9 @@ onBeforeUnmount(() => {
 .mode-switch {
   position: relative;
   display: inline-grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.25rem;
-  width: 9.5rem;
+  width: min(22rem, calc(100vw - 1rem));
   border: 1px solid hsl(var(--border));
   border-radius: var(--radius);
   background: hsl(var(--secondary));
@@ -4375,7 +4393,7 @@ onBeforeUnmount(() => {
 .mode-switch-thumb {
   position: absolute;
   inset: 0.25rem auto 0.25rem 0.25rem;
-  width: calc(50% - 0.375rem);
+  width: calc((100% - 1rem) / 3);
   border-radius: calc(var(--radius) - 2px);
   border: 1px solid hsl(var(--border) / 0.72);
   background: hsl(var(--selection));
@@ -4385,25 +4403,35 @@ onBeforeUnmount(() => {
 }
 
 .mode-switch[data-mode="video"] .mode-switch-thumb {
-  transform: translateX(calc(100% + 0.5rem));
+  transform: translateX(calc(100% + 0.25rem));
+}
+
+.mode-switch[data-mode="canvas"] .mode-switch-thumb {
+  transform: translateX(calc((100% + 0.25rem) * 2));
 }
 
 .mode-switch-button {
   position: relative;
   z-index: 1;
   display: inline-flex;
+  min-width: 0;
   height: 2rem;
   align-items: center;
   justify-content: center;
   gap: 0.375rem;
   border-radius: calc(var(--radius) - 2px);
-  padding: 0 0.5rem;
+  padding: 0 0.375rem;
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.25rem;
+  white-space: nowrap;
   transition:
     color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
     transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.mode-switch-button svg {
+  flex-shrink: 0;
 }
 
 .mode-switch-button:active {
