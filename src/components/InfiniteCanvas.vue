@@ -43,6 +43,10 @@ import {
   CODEX_IMAGE_API_BASE_URL,
   createImageTask,
   generateImage,
+  imageJobToTask,
+  listImageJobs,
+  pollImageJob,
+  type ImageJobStatus,
 } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
 import type {
@@ -70,6 +74,13 @@ interface CanvasNode {
   generatedPrompt?: string;
   status?: CanvasNodeStatus;
   error?: string;
+  serverJobId?: string;
+  clientRequestId?: string;
+  generationStartedAt?: number;
+  generationModel?: ImageModelId;
+  generationConfig?: ImageConfigRecord;
+  generationPrompt?: string;
+  generationSourceCount?: number;
 }
 
 interface Viewport {
@@ -163,7 +174,6 @@ const STORAGE_KEY = "art-workshop-infinite-canvas-v1";
 const HIDDEN_CANVAS_MODEL_IDS = new Set<ImageModelId>(["qwen-image-edit-multiple-angles"]);
 const MIN_ZOOM = 0.28;
 const MAX_ZOOM = 2.2;
-const GENERATION_TIMEOUT_MS = 8 * 60 * 1000;
 
 const boardRef = ref<HTMLElement | null>(null);
 const imageInput = ref<HTMLInputElement | null>(null);
@@ -194,6 +204,7 @@ const assetCategoryDialogOpen = ref(false);
 const assetCategoryDraft = ref("新文件夹");
 
 let saveTimer: number | undefined;
+let canvasPollTimer: number | undefined;
 const activeRuns = new Map<string, string>();
 
 const selectableImageModels = IMAGE_MODELS.filter((model) => !HIDDEN_CANVAS_MODEL_IDS.has(model.id));
@@ -281,8 +292,11 @@ function cloneNodes(value: CanvasNode[]) {
 function normalizeNodes(value: CanvasNode[]) {
   return cloneNodes(value).map((node) => ({
     ...node,
-    status: node.status === "generating" ? "idle" : node.status,
-    error: node.status === "generating" ? "" : node.error,
+    status:
+      node.status === "generating" && !node.serverJobId && !node.clientRequestId
+        ? "idle"
+        : node.status,
+    error: node.status === "generating" && !node.serverJobId && !node.clientRequestId ? "" : node.error,
   }));
 }
 
@@ -793,22 +807,6 @@ function linkPath(link: CanvasLink) {
   return `M ${start.x} ${start.y} C ${start.x + delta} ${start.y}, ${end.x - delta} ${end.y}, ${end.x} ${end.y}`;
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
-  return new Promise<T>((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
-    promise.then(
-      (value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        window.clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
 function pickImageFiles() {
   imageInput.value?.click();
 }
@@ -1163,10 +1161,13 @@ function buildCanvasImageTask(
   config: ImageConfigRecord,
   sourceImages: string[],
   startedAt: number,
+  clientRequestId?: string,
 ): ImageTask {
   return createImageTask({
     createdAt: startedAt,
+    updatedAt: startedAt,
     status: "generating",
+    clientRequestId,
     sourceImages,
     prompt,
     model,
@@ -1197,6 +1198,217 @@ function countNodeReferences(node: CanvasNode) {
   return [...mentioned, ...selected].filter((source, index, list) => Boolean(source) && list.indexOf(source) === index).length;
 }
 
+function createClientRequestId(prefix = "canvas-image") {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function hasResumableCanvasJob(node: CanvasNode) {
+  return node.kind === "prompt" && node.status === "generating" && Boolean(node.serverJobId || node.clientRequestId);
+}
+
+function clearCanvasGenerationState(node: CanvasNode) {
+  delete node.serverJobId;
+  delete node.clientRequestId;
+  delete node.generationStartedAt;
+  delete node.generationModel;
+  delete node.generationConfig;
+  delete node.generationPrompt;
+  delete node.generationSourceCount;
+}
+
+function updateNodeFromImageJob(node: CanvasNode, job: ImageJobStatus) {
+  node.serverJobId = job.id || node.serverJobId;
+  node.clientRequestId = job.clientRequestId || node.clientRequestId;
+  node.generationStartedAt = node.generationStartedAt || job.createdAt;
+  node.generationModel = node.generationModel || job.model;
+  node.generationConfig = node.generationConfig || { ...(job.modelConfig || {}) };
+  node.generationPrompt = node.generationPrompt || job.prompt;
+  node.generationSourceCount = node.generationSourceCount ?? job.sourceImageCount ?? 0;
+}
+
+function createCanvasFallbackTask(node: CanvasNode, job: ImageJobStatus): ImageTask {
+  const createdAt = Number(node.generationStartedAt || job.createdAt || Date.now());
+  return {
+    id: node.clientRequestId || node.serverJobId || job.id,
+    createdAt,
+    updatedAt: job.updatedAt || Date.now(),
+    status: "generating",
+    serverJobId: job.id || node.serverJobId,
+    clientRequestId: job.clientRequestId || node.clientRequestId,
+    remoteStatus: job.status,
+    sourceImages: [],
+    prompt: node.generationPrompt || job.prompt || node.prompt || "",
+    model: node.generationModel || job.model,
+    modelConfig: node.generationConfig || job.modelConfig || {},
+    resultImages: [],
+    generationTime: Date.now() - createdAt,
+    error: node.error || job.error || "",
+  };
+}
+
+function pushCanvasLog(entry: Omit<CanvasLogEntry, "id">) {
+  logs.value = [{ id: createId("log"), ...entry }, ...logs.value].slice(0, 100);
+}
+
+async function applyCanvasImageJob(node: CanvasNode, job: ImageJobStatus) {
+  updateNodeFromImageJob(node, job);
+
+  const task = imageJobToTask(job, createCanvasFallbackTask(node, job));
+  if (task.status === "generating") {
+    node.status = "generating";
+    node.error = job.progress || node.error || "";
+    scheduleSave();
+    return false;
+  }
+
+  activeRuns.delete(node.id);
+
+  if (task.status === "success") {
+    const resultImages = task.resultImages.filter(Boolean);
+    if (resultImages.length === 0) {
+      node.status = "error";
+      node.error = "图像生成任务完成，但没有返回图片";
+      pushCanvasLog({
+        prompt: task.prompt,
+        model: task.model,
+        sourceCount: node.generationSourceCount || job.sourceImageCount || 0,
+        createdAt: task.createdAt,
+        generationTime: Date.now() - task.createdAt,
+        status: "failed",
+        resultImages: [],
+        error: node.error,
+      });
+      clearCanvasGenerationState(node);
+      scheduleSave();
+      return true;
+    }
+
+    resultImages.forEach((source, index) => {
+      addImageNode(
+        source,
+        `生成结果 ${index + 1}`,
+        node.x + node.width + 56 + index * 38,
+        node.y + index * 38,
+      ).generatedPrompt = task.prompt;
+    });
+
+    const finalTask: ImageTask = {
+      ...task,
+      status: "success",
+      resultImages,
+      generationTime: task.generationTime || Date.now() - task.createdAt,
+      updatedAt: Date.now(),
+      error: "",
+    };
+    await store.addHistoryTask(finalTask);
+    pushCanvasLog({
+      prompt: task.prompt,
+      model: task.model,
+      sourceCount: node.generationSourceCount || job.sourceImageCount || 0,
+      createdAt: task.createdAt,
+      generationTime: finalTask.generationTime,
+      status: "success",
+      resultImages,
+    });
+    node.status = "success";
+    node.error = "";
+    node.generatedPrompt = task.prompt;
+    clearCanvasGenerationState(node);
+    scheduleSave();
+    return true;
+  }
+
+  node.status = "error";
+  node.error = task.error || "生成失败";
+  pushCanvasLog({
+    prompt: task.prompt,
+    model: task.model,
+    sourceCount: node.generationSourceCount || job.sourceImageCount || 0,
+    createdAt: task.createdAt,
+    generationTime: task.generationTime || Date.now() - task.createdAt,
+    status: "failed",
+    resultImages: [],
+    error: node.error,
+  });
+  clearCanvasGenerationState(node);
+  scheduleSave();
+  return true;
+}
+
+function clearCanvasJobPolling() {
+  if (canvasPollTimer) {
+    window.clearTimeout(canvasPollTimer);
+    canvasPollTimer = undefined;
+  }
+}
+
+function scheduleCanvasJobPolling(delay = 1000) {
+  clearCanvasJobPolling();
+  if (document.visibilityState === "hidden" || !nodes.value.some(hasResumableCanvasJob)) {
+    return;
+  }
+
+  canvasPollTimer = window.setTimeout(() => {
+    void refreshCanvasJobs();
+  }, delay);
+}
+
+async function refreshCanvasJobs(force = false) {
+  if (document.visibilityState === "hidden" && !force) {
+    return;
+  }
+
+  if (force) {
+    clearCanvasJobPolling();
+  }
+
+  const pendingNodes = nodes.value.filter(hasResumableCanvasJob);
+  if (pendingNodes.length === 0) {
+    clearCanvasJobPolling();
+    return;
+  }
+
+  let listedJobs: ImageJobStatus[] | null = null;
+  for (const node of pendingNodes) {
+    try {
+      let job: ImageJobStatus | undefined;
+      if (node.serverJobId) {
+        job = await pollImageJob(node.serverJobId);
+      } else if (node.clientRequestId) {
+        listedJobs = listedJobs || (await listImageJobs(20));
+        job = listedJobs.find((item) => item.clientRequestId === node.clientRequestId);
+      }
+
+      if (job) {
+        await applyCanvasImageJob(node, job);
+      }
+    } catch (error) {
+      node.error = error instanceof Error ? error.message : String(error);
+      scheduleSave();
+    }
+  }
+
+  if (nodes.value.some(hasResumableCanvasJob)) {
+    scheduleCanvasJobPolling(5000);
+  } else {
+    clearCanvasJobPolling();
+  }
+}
+
+function resumeCanvasImageWork() {
+  if (document.visibilityState === "hidden") {
+    return;
+  }
+
+  if (nodes.value.some(hasResumableCanvasJob)) {
+    void refreshCanvasJobs(true);
+  }
+}
+
 async function runPromptNode(node: CanvasNode) {
   const prompt = String(node.prompt || "").trim();
   if (!prompt || node.status === "generating") {
@@ -1215,20 +1427,36 @@ async function runPromptNode(node: CanvasNode) {
     const config = { ...activeImageConfig.value };
     const sourceImages = await buildSourceImages(node);
     const generationPrompt = cleanPromptForGeneration(prompt);
-    const task = buildCanvasImageTask(generationPrompt, model, config, sourceImages, startedAt);
+    const clientRequestId = createClientRequestId();
+    const task = buildCanvasImageTask(generationPrompt, model, config, sourceImages, startedAt, clientRequestId);
+    let latestTask = task;
+    node.clientRequestId = clientRequestId;
+    node.generationStartedAt = startedAt;
+    node.generationModel = model;
+    node.generationConfig = { ...config };
+    node.generationPrompt = generationPrompt;
+    node.generationSourceCount = sourceImages.length;
+    scheduleSave();
+
     const usesCodexImageKey = model === "codex-image-2";
-    const result = await withTimeout(
-      generateImage({
+    const result = await generateImage({
         model,
         prompt: generationPrompt,
         sourceImages,
         config,
+        clientRequestId,
+        onJobUpdate: (job) => {
+          if (activeRuns.get(node.id) !== runId) {
+            return;
+          }
+          latestTask = imageJobToTask(job, task);
+          updateNodeFromImageJob(node, job);
+          node.status = latestTask.status === "generating" ? "generating" : node.status;
+          scheduleSave();
+        },
         apiBaseUrl: usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl,
         apiKey: usesCodexImageKey ? store.codexApiKey : store.apiKey,
-      }),
-      GENERATION_TIMEOUT_MS,
-      "生成超时，请重试",
-    );
+      });
 
     if (activeRuns.get(node.id) !== runId) {
       return;
@@ -1245,14 +1473,15 @@ async function runPromptNode(node: CanvasNode) {
     });
 
     const finalTask: ImageTask = {
-      ...task,
+      ...latestTask,
       status: "success",
       resultImages,
       generationTime: Date.now() - startedAt,
+      updatedAt: Date.now(),
+      error: "",
     };
     await store.addHistoryTask(finalTask);
-    const logEntry: CanvasLogEntry = {
-      id: createId("log"),
+    pushCanvasLog({
       prompt: generationPrompt,
       model,
       sourceCount: sourceImages.length,
@@ -1260,27 +1489,36 @@ async function runPromptNode(node: CanvasNode) {
       generationTime: Date.now() - startedAt,
       status: "success",
       resultImages,
-    };
-    logs.value = [logEntry, ...logs.value].slice(0, 100);
+    });
     node.status = "success";
+    node.error = "";
+    node.generatedPrompt = generationPrompt;
+    clearCanvasGenerationState(node);
   } catch (error) {
     if (activeRuns.get(node.id) !== runId) {
       return;
     }
+    const message = error instanceof Error ? error.message : "生成失败";
+    if (node.serverJobId && /仍在服务器运行/.test(message)) {
+      node.status = "generating";
+      node.error = message;
+      scheduleCanvasJobPolling(10000);
+      return;
+    }
+
     node.status = "error";
-    node.error = error instanceof Error ? error.message : "生成失败";
-    const logEntry: CanvasLogEntry = {
-      id: createId("log"),
+    node.error = message;
+    pushCanvasLog({
       prompt,
       model: activeImageModelId.value,
-      sourceCount: 0,
+      sourceCount: node.generationSourceCount || 0,
       createdAt: startedAt,
       generationTime: Date.now() - startedAt,
       status: "failed",
       resultImages: [],
       error: node.error,
-    };
-    logs.value = [logEntry, ...logs.value].slice(0, 100);
+    });
+    clearCanvasGenerationState(node);
   } finally {
     if (activeRuns.get(node.id) === runId) {
       activeRuns.delete(node.id);
@@ -1293,6 +1531,7 @@ function stopPromptNode(node: CanvasNode) {
   activeRuns.delete(node.id);
   node.status = "idle";
   node.error = "";
+  clearCanvasGenerationState(node);
   scheduleSave();
 }
 
@@ -1437,6 +1676,16 @@ function handleKeydown(event: KeyboardEvent) {
   }
 }
 
+function handleCanvasPageActive() {
+  resumeCanvasImageWork();
+}
+
+function handleCanvasVisibilityChange() {
+  if (document.visibilityState !== "hidden") {
+    resumeCanvasImageWork();
+  }
+}
+
 onMounted(async () => {
   loadCanvas();
   await nextTick();
@@ -1445,12 +1694,22 @@ onMounted(async () => {
   }
   window.addEventListener("paste", handlePaste, { capture: true });
   window.addEventListener("keydown", handleKeydown);
+  document.addEventListener("visibilitychange", handleCanvasVisibilityChange);
+  window.addEventListener("pageshow", handleCanvasPageActive);
+  window.addEventListener("focus", handleCanvasPageActive);
+  window.addEventListener("online", handleCanvasPageActive);
+  resumeCanvasImageWork();
 });
 
 onBeforeUnmount(() => {
   window.clearTimeout(saveTimer);
+  clearCanvasJobPolling();
   window.removeEventListener("paste", handlePaste, { capture: true });
   window.removeEventListener("keydown", handleKeydown);
+  document.removeEventListener("visibilitychange", handleCanvasVisibilityChange);
+  window.removeEventListener("pageshow", handleCanvasPageActive);
+  window.removeEventListener("focus", handleCanvasPageActive);
+  window.removeEventListener("online", handleCanvasPageActive);
   window.removeEventListener("pointermove", handlePointerMove);
 });
 

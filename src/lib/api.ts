@@ -157,11 +157,6 @@ function isHtmlErrorResponse(data: unknown): boolean {
   return typeof raw === "string" && /<!doctype html|<html[\s>]|<body[\s>]|nginx/i.test(raw);
 }
 
-function isImageJobApiUnavailable(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /HTTP 404|404 not found|nginx|接口不可用|后端连接被关闭或不可达|failed to fetch|networkerror|load failed/i.test(message);
-}
-
 function sanitizeHeaders(headers: HeadersInit | undefined): Record<string, string> {
   if (!headers) {
     return {};
@@ -1190,17 +1185,8 @@ export async function waitForImageJob(
 }
 
 export async function generateImage(args: GenerateImageArgs): Promise<GenerateImageResult> {
-  let submittedJob: ImageJobStatus | null = null;
-
-  try {
-    submittedJob = await submitImageJob(args);
-    args.onJobUpdate?.(submittedJob);
-  } catch (error) {
-    if (isImageJobApiUnavailable(error)) {
-      return generateImageDirect(args);
-    }
-    throw error;
-  }
+  const submittedJob = await submitImageJob(args);
+  args.onJobUpdate?.(submittedJob);
 
   const finalJob = await waitForImageJob(submittedJob.id, args.onJobUpdate);
   if (finalJob.resultImages.length === 0) {

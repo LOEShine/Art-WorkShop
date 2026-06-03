@@ -103,6 +103,72 @@ install_codex_proxy() {
 
   local backup_file="$config_file.bak-$(date '+%Y%m%d%H%M%S')"
   cp "$config_file" "$backup_file"
+
+  local extension_dir="/www/server/panel/vhost/nginx/extension/$server_name"
+  if ! grep -q "BEGIN Art Workshop Codex image proxy" "$config_file" && grep -q "extension/$server_name" "$config_file"; then
+    mkdir -p "$extension_dir"
+    cat > "$extension_dir/image-job-api.conf" <<'NGINX'
+# Art Workshop persistent image job API
+location = /api {
+    return 308 /api/;
+}
+
+location ^~ /api/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    client_max_body_size 96m;
+}
+NGINX
+
+    if [[ ! -f "$extension_dir/codex-image-api.conf" ]]; then
+      cat > "$extension_dir/codex-image-api.conf" <<'NGINX'
+# Art Workshop Codex image API proxy
+location = /codex-image-api {
+    return 308 /codex-image-api/;
+}
+
+location ^~ /codex-image-api/ {
+    proxy_pass https://sgdr.funai.vip/;
+    proxy_ssl_server_name on;
+    proxy_http_version 1.1;
+    proxy_set_header Host sgdr.funai.vip;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header Origin "";
+    proxy_set_header Referer "";
+    proxy_set_header User-Agent "ArtWorkshop-Proxy/1.0";
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+    client_max_body_size 64m;
+}
+NGINX
+    fi
+
+    if [[ -x "$nginx_bin" && -f "$nginx_conf" ]]; then
+      if "$nginx_bin" -t -c "$nginx_conf" && "$nginx_bin" -s reload -c "$nginx_conf"; then
+        echo "[deploy] proxy config installed in $extension_dir"
+        return 0
+      fi
+    elif command -v nginx >/dev/null 2>&1; then
+      if nginx -t && nginx -s reload; then
+        echo "[deploy] proxy config installed in $extension_dir"
+        return 0
+      fi
+    fi
+
+    echo "[deploy] nginx reload failed after writing extension proxy config"
+    return 0
+  fi
+
   python3 - "$config_file" <<'PY'
 import re
 import sys

@@ -1050,17 +1050,25 @@ function resumeImageWork() {
 }
 
 async function restoreLatestServerImageJob() {
-  if (store.currentTask || document.visibilityState === "hidden") {
+  if (document.visibilityState === "hidden") {
+    return;
+  }
+
+  const currentTask = store.currentTask;
+  if (currentTask && (currentTask.status !== "generating" || currentTask.serverJobId)) {
     return;
   }
 
   try {
-    const [job] = await listImageJobs(1);
+    const jobs = await listImageJobs(10);
+    const job = currentTask?.clientRequestId
+      ? jobs.find((item) => item.clientRequestId === currentTask.clientRequestId)
+      : jobs[0];
     if (!job) {
       return;
     }
 
-    const task = imageJobToTask(job);
+    const task = imageJobToTask(job, currentTask || undefined);
     store.setCurrentTask(task);
     store.setIsGenerating(task.status === "generating");
     if (task.status === "success" || task.status === "failed") {
@@ -1304,6 +1312,11 @@ watch(
       if (!imagePollTimer) {
         scheduleImagePolling(1000);
       }
+      return;
+    }
+
+    if (status === "generating" && !serverJobId) {
+      void restoreLatestServerImageJob();
       return;
     }
 
