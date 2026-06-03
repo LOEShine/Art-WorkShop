@@ -5,6 +5,7 @@ import {
   isFirstLastFramesEnabled,
   resolveVideoMode,
 } from "@/data/video-models";
+import { getAnonymousUserId } from "@/lib/anonymous-user";
 import type {
   ImageConfigRecord,
   ImageModelId,
@@ -21,10 +22,28 @@ interface GenerateImageArgs {
   config: ImageConfigRecord;
   apiBaseUrl: string;
   apiKey: string;
+  clientRequestId?: string;
+  onJobUpdate?: (job: ImageJobStatus) => void;
 }
 
 interface GenerateImageResult {
   images: string[];
+}
+
+export interface ImageJobStatus {
+  id: string;
+  clientRequestId?: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  progress?: string;
+  sourceImageCount?: number;
+  prompt: string;
+  model: ImageModelId;
+  modelConfig: ImageConfigRecord;
+  resultImages: string[];
+  generationTime: number;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 interface SubmitVideoArgs {
@@ -50,6 +69,7 @@ export const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
 export const CODEX_IMAGE_REMOTE_BASE_URL = "https://sgdr.funai.vip";
 export const CODEX_IMAGE_API_BASE_URL = "/codex-image-api";
 export const WAVESPEED_API_BASE_URL = "/wavespeed-api";
+export const IMAGE_JOB_API_BASE_URL = "/api";
 
 export function buildApiUrl(baseUrl: string, path: string): string {
   if (/^https?:\/\//i.test(path)) {
@@ -827,7 +847,7 @@ export async function optimizeImagePrompt(
   throw new Error(lastError instanceof Error ? lastError.message : "优化失败，未获取到结果");
 }
 
-export async function generateImage(args: GenerateImageArgs): Promise<GenerateImageResult> {
+export async function generateImageDirect(args: GenerateImageArgs): Promise<GenerateImageResult> {
   const { apiBaseUrl, apiKey, config, model, prompt, sourceImages } = args;
   if (model !== "qwen-image-edit-multiple-angles") {
     ensureApiKey(apiKey);
@@ -1016,6 +1036,149 @@ export async function generateImage(args: GenerateImageArgs): Promise<GenerateIm
   }
 
   return { images };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function getImageJobHeaders(): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "X-Art-Workshop-User": getAnonymousUserId(),
+  };
+}
+
+function resolveServerImageApiBaseUrl(model: ImageModelId, apiBaseUrl: string): string {
+  if (model === "codex-image-2" || apiBaseUrl === CODEX_IMAGE_API_BASE_URL) {
+    return CODEX_IMAGE_REMOTE_BASE_URL;
+  }
+
+  if (model === "qwen-image-edit-multiple-angles") {
+    return "";
+  }
+
+  return apiBaseUrl;
+}
+
+export function isImageJobPending(status: string): boolean {
+  return /queued|running|pending|generating/i.test(String(status || ""));
+}
+
+export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): ImageTask {
+  const pending = isImageJobPending(job.status);
+  return {
+    id: fallback?.id || job.clientRequestId || job.id,
+    createdAt: fallback?.createdAt || job.createdAt,
+    updatedAt: job.updatedAt,
+    status: job.status === "succeeded" ? "success" : job.status === "failed" ? "failed" : "generating",
+    serverJobId: job.id,
+    clientRequestId: job.clientRequestId || fallback?.clientRequestId,
+    remoteStatus: job.status,
+    sourceImages: fallback?.sourceImages || [],
+    prompt: fallback?.prompt || job.prompt,
+    model: fallback?.model || job.model,
+    modelConfig: fallback?.modelConfig || job.modelConfig,
+    resultImages: pending ? fallback?.resultImages || [] : job.resultImages,
+    generationTime: job.generationTime || (pending ? Date.now() - (fallback?.createdAt || job.createdAt) : 0),
+    error: job.error || fallback?.error,
+  };
+}
+
+export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobStatus> {
+  const { apiBaseUrl, apiKey, clientRequestId, config, model, prompt, sourceImages } = args;
+  if (model !== "qwen-image-edit-multiple-angles") {
+    ensureApiKey(apiKey);
+  }
+
+  return fetchJsonWithNetworkError<ImageJobStatus>(buildApiUrl(IMAGE_JOB_API_BASE_URL, "/image-jobs"), {
+    method: "POST",
+    headers: getImageJobHeaders(),
+    body: JSON.stringify({
+      clientRequestId,
+      model,
+      prompt,
+      sourceImages,
+      config,
+      apiBaseUrl: resolveServerImageApiBaseUrl(model, apiBaseUrl),
+      apiKey: model === "qwen-image-edit-multiple-angles" ? "" : apiKey,
+    }),
+  });
+}
+
+export async function pollImageJob(jobId: string): Promise<ImageJobStatus> {
+  return fetchJsonWithNetworkError<ImageJobStatus>(
+    buildApiUrl(IMAGE_JOB_API_BASE_URL, `/image-jobs/${encodeURIComponent(jobId)}`),
+    {
+      method: "GET",
+      headers: getImageJobHeaders(),
+    },
+  );
+}
+
+export async function listImageJobs(limit = 20): Promise<ImageJobStatus[]> {
+  const response = await fetchJsonWithNetworkError<{ jobs: ImageJobStatus[] }>(
+    buildApiUrl(IMAGE_JOB_API_BASE_URL, `/image-jobs?limit=${encodeURIComponent(String(limit))}`),
+    {
+      method: "GET",
+      headers: getImageJobHeaders(),
+    },
+  );
+  return response.jobs || [];
+}
+
+export async function waitForImageJob(
+  jobId: string,
+  onJobUpdate?: (job: ImageJobStatus) => void,
+  timeoutMs = 30 * 60 * 1000,
+): Promise<ImageJobStatus> {
+  const startedAt = Date.now();
+  let pollDelay = 1600;
+  let transientFailures = 0;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    await delay(pollDelay);
+
+    try {
+      const job = await pollImageJob(jobId);
+      transientFailures = 0;
+      onJobUpdate?.(job);
+
+      if (job.status === "succeeded") {
+        return job;
+      }
+
+      if (job.status === "failed") {
+        const jobError = new Error(job.error || "图像生成任务失败");
+        jobError.name = "ImageJobFailed";
+        throw jobError;
+      }
+
+      pollDelay = job.status === "queued" ? 2500 : 5000;
+    } catch (error) {
+      if (error instanceof Error && error.name === "ImageJobFailed") {
+        throw error;
+      }
+
+      transientFailures += 1;
+      pollDelay = Math.min(15000, 2000 + transientFailures * 2000);
+    }
+  }
+
+  throw new Error("图像生成任务仍在服务器运行，请稍后回到页面继续查看结果");
+}
+
+export async function generateImage(args: GenerateImageArgs): Promise<GenerateImageResult> {
+  const submittedJob = await submitImageJob(args);
+  args.onJobUpdate?.(submittedJob);
+
+  const finalJob = await waitForImageJob(submittedJob.id, args.onJobUpdate);
+  if (finalJob.resultImages.length === 0) {
+    throw new Error("图像生成任务完成，但没有返回图片");
+  }
+
+  return { images: finalJob.resultImages };
 }
 
 export async function submitVideoTask({

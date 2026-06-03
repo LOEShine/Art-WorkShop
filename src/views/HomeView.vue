@@ -62,8 +62,11 @@ import {
   CODEX_IMAGE_API_BASE_URL,
   createImageTask,
   generateImage,
+  imageJobToTask,
   isErrorStatus,
+  listImageJobs,
   optimizeImagePrompt,
+  pollImageJob,
   pollVideoTask,
   submitVideoTask,
   submitVeoVideoExtension,
@@ -207,6 +210,7 @@ const draggingVideoIndex = ref<number | null>(null);
 const videoUploadTargetIndex = ref<number | null>(null);
 
 let imageTimer: number | undefined;
+let imagePollTimer: number | undefined;
 let videoTimer: number | undefined;
 let videoPollTimer: number | undefined;
 let videoSubmitRetryTimer: number | undefined;
@@ -980,6 +984,96 @@ watch(
   { immediate: true },
 );
 
+function clearImagePolling() {
+  if (imagePollTimer) {
+    window.clearTimeout(imagePollTimer);
+    imagePollTimer = undefined;
+  }
+}
+
+function scheduleImagePolling(delay = 1000) {
+  clearImagePolling();
+
+  if (store.currentTask?.status !== "generating" || !store.currentTask.serverJobId) {
+    return;
+  }
+
+  imagePollTimer = window.setTimeout(() => {
+    void refreshImageTask();
+  }, delay);
+}
+
+async function refreshImageTask(force = false) {
+  const task = store.currentTask;
+  if (!task || task.status !== "generating" || !task.serverJobId) {
+    clearImagePolling();
+    store.setIsGenerating(false);
+    return;
+  }
+
+  if (force) {
+    clearImagePolling();
+  }
+
+  try {
+    const job = await pollImageJob(task.serverJobId);
+    const updatedTask = imageJobToTask(job, task);
+    store.setCurrentTask(updatedTask);
+    store.setIsGenerating(updatedTask.status === "generating");
+
+    if (updatedTask.status === "success" || updatedTask.status === "failed") {
+      void store.addHistoryTask(updatedTask);
+      clearImagePolling();
+      return;
+    }
+
+    scheduleImagePolling(job.status === "queued" ? 2500 : 5000);
+  } catch (error) {
+    store.setCurrentTask({
+      ...task,
+      updatedAt: Date.now(),
+      error: error instanceof Error ? error.message : String(error),
+    });
+    store.setIsGenerating(true);
+    scheduleImagePolling(10000);
+  }
+}
+
+function resumeImageWork() {
+  if (document.visibilityState === "hidden") {
+    return;
+  }
+
+  if (store.currentTask?.status === "generating" && store.currentTask.serverJobId) {
+    void refreshImageTask(true);
+  }
+}
+
+async function restoreLatestServerImageJob() {
+  if (store.currentTask || document.visibilityState === "hidden") {
+    return;
+  }
+
+  try {
+    const [job] = await listImageJobs(1);
+    if (!job) {
+      return;
+    }
+
+    const task = imageJobToTask(job);
+    store.setCurrentTask(task);
+    store.setIsGenerating(task.status === "generating");
+    if (task.status === "success" || task.status === "failed") {
+      void store.addHistoryTask(task);
+    }
+    if (task.status === "generating") {
+      scheduleImagePolling(1000);
+    }
+  } catch {
+    // The job API may be offline in local static preview; keep the existing local state.
+  }
+}
+
 function clearVideoPolling() {
   if (videoPollTimer) {
     window.clearTimeout(videoPollTimer);
@@ -1190,6 +1284,8 @@ function handleVideoPageHidden() {
 }
 
 function handleVideoPageActive() {
+  resumeImageWork();
+  void restoreLatestServerImageJob();
   resumeVideoWork();
 }
 
@@ -1200,6 +1296,23 @@ function handleVisibilityChange() {
     handleVideoPageActive();
   }
 }
+
+watch(
+  () => [store.currentTask?.status, store.currentTask?.serverJobId] as const,
+  ([status, serverJobId]) => {
+    if (status === "generating" && serverJobId) {
+      if (!imagePollTimer) {
+        scheduleImagePolling(1000);
+      }
+      return;
+    }
+
+    clearImagePolling();
+    if (status !== "generating") {
+      store.setIsGenerating(false);
+    }
+  },
+);
 
 watch(
   () => [store.videoTask?.phase, store.videoTask?.id, store.videoTask?.status] as const,
@@ -1218,6 +1331,18 @@ watch(
 
     clearVideoPolling();
     clearVideoSubmitRetry();
+  },
+);
+
+watch(
+  () => store.historyHydrated,
+  (hydrated) => {
+    if (!hydrated) {
+      return;
+    }
+    resumeImageWork();
+    void restoreLatestServerImageJob();
+    resumeVideoWork();
   },
 );
 
@@ -2410,9 +2535,15 @@ async function handleGenerateImage() {
   const generationConfig = buildGenerationImageConfig(generationModel);
   const generationPrompt = buildGenerationImagePrompt(generationModel);
   const sourceImages = buildEffectiveSourceImages();
+  const clientRequestId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `image-${startedAt}`;
   const task = createImageTask({
     createdAt: startedAt,
+    updatedAt: startedAt,
     status: "generating",
+    clientRequestId,
     sourceImages,
     prompt: imagePrompt,
     model: generationModel,
@@ -2424,6 +2555,8 @@ async function handleGenerateImage() {
   store.setCurrentTask(task);
   store.setIsGenerating(true);
 
+  let latestTask = task;
+
   try {
     const usesCodexImageKey = generationModel === "codex-image-2";
     const result = await generateImage({
@@ -2431,6 +2564,12 @@ async function handleGenerateImage() {
       prompt: generationPrompt,
       sourceImages,
       config: generationConfig,
+      clientRequestId,
+      onJobUpdate: (job) => {
+        latestTask = imageJobToTask(job, task);
+        store.setCurrentTask(latestTask);
+        store.setIsGenerating(latestTask.status === "generating");
+      },
       apiBaseUrl:
         generationModel === "qwen-image-edit-multiple-angles"
           ? ""
@@ -2446,26 +2585,42 @@ async function handleGenerateImage() {
     });
 
     const finalTask: ImageTask = {
-      ...task,
+      ...latestTask,
       status: "success",
       resultImages: result.images,
       generationTime: Date.now() - startedAt,
+      updatedAt: Date.now(),
+      error: "",
     };
 
     store.setCurrentTask(finalTask);
     store.addHistoryTask(finalTask);
   } catch (error) {
+    const message = error instanceof Error ? error.message : "未知错误";
+    if (latestTask.serverJobId && /仍在服务器运行/.test(message)) {
+      store.setCurrentTask({
+        ...latestTask,
+        status: "generating",
+        updatedAt: Date.now(),
+        error: message,
+      });
+      store.setIsGenerating(true);
+      scheduleImagePolling(10000);
+      return;
+    }
+
     const finalTask: ImageTask = {
-      ...task,
+      ...latestTask,
       status: "failed",
       generationTime: Date.now() - startedAt,
-      error: error instanceof Error ? error.message : "未知错误",
+      updatedAt: Date.now(),
+      error: message,
     };
 
     store.setCurrentTask(finalTask);
     store.addHistoryTask(finalTask);
   } finally {
-    store.setIsGenerating(false);
+    store.setIsGenerating(store.currentTask?.status === "generating");
   }
 }
 
@@ -2680,6 +2835,12 @@ onMounted(() => {
   window.addEventListener("focus", handleVideoPageActive);
   window.addEventListener("online", handleVideoPageActive);
   window.requestAnimationFrame(ensureTextareaHeight);
+  if (store.currentTask?.status === "generating") {
+    resumeImageWork();
+  }
+  if (!store.currentTask) {
+    void restoreLatestServerImageJob();
+  }
   if (store.videoTask?.phase === "pending") {
     resumeVideoWork();
   }
@@ -2697,6 +2858,7 @@ onBeforeUnmount(() => {
   if (imageTimer) {
     window.clearInterval(imageTimer);
   }
+  clearImagePolling();
   if (videoTimer) {
     window.clearInterval(videoTimer);
   }

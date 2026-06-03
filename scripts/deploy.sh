@@ -22,6 +22,61 @@ rsync -av --delete \
   --exclude="index.html.bak-*" \
   "dist/" "$DEPLOY_DIR/"
 
+install_image_job_service() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "[deploy] systemctl not found; skip image job service install"
+    return 0
+  fi
+
+  local node_bin
+  node_bin="$(command -v node || true)"
+  if [[ -z "$node_bin" ]]; then
+    echo "[deploy] node binary not found; skip image job service install"
+    return 0
+  fi
+
+  local service_file="/etc/systemd/system/art-workshop-api.service"
+  local env_file="/etc/art-workshop-api.env"
+
+  if [[ ! -f "$env_file" ]]; then
+    cat > "$env_file" <<'ENV'
+ART_WORKSHOP_API_HOST=127.0.0.1
+ART_WORKSHOP_API_PORT=8787
+ART_WORKSHOP_STORAGE_DIR=/var/lib/art-workshop
+# Optional, required only for the WaveSpeed multi-angle model.
+WAVESPEED_API_KEY=
+ENV
+    chmod 600 "$env_file"
+  fi
+
+  cat > "$service_file" <<SERVICE
+[Unit]
+Description=Art Workshop Image Job API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=$ROOT_DIR
+EnvironmentFile=-$env_file
+ExecStart=$node_bin $ROOT_DIR/server/index.mjs
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+  systemctl daemon-reload
+  systemctl enable art-workshop-api.service >/dev/null 2>&1 || true
+  if systemctl restart art-workshop-api.service; then
+    echo "[deploy] image job service restarted"
+  else
+    echo "[deploy] image job service restart failed; check journalctl -u art-workshop-api.service"
+    return 0
+  fi
+}
+
 install_codex_proxy() {
   local server_name="${SERVER_NAME:-ai.faker2025.site}"
   local config_file=""
@@ -57,6 +112,24 @@ path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 block = """
     # BEGIN Art Workshop Codex image proxy
+    location = /api {
+        return 308 /api/;
+    }
+
+    location ^~ /api/ {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        client_max_body_size 96m;
+    }
+
     location = /codex-image-api {
         return 308 /codex-image-api/;
     }
@@ -115,6 +188,7 @@ PY
   fi
 }
 
+install_image_job_service
 install_codex_proxy
 
 echo "[deploy] completed at $(date '+%Y-%m-%d %H:%M:%S')"

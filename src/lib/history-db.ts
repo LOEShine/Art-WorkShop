@@ -4,10 +4,12 @@ import type { DBSchema, IDBPDatabase } from "idb";
 import type { ImageTask, VideoTask } from "@/types";
 
 const DB_NAME = "art-workshop-db";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const IMAGE_HISTORY_STORE = "image-history";
 const VIDEO_HISTORY_STORE = "video-history";
+const CURRENT_IMAGE_TASK_STORE = "current-image-task";
 const CURRENT_VIDEO_TASK_STORE = "current-video-task";
+const CURRENT_IMAGE_TASK_KEY = "current";
 const CURRENT_VIDEO_TASK_KEY = "current";
 
 interface ArtWorkshopDb extends DBSchema {
@@ -25,12 +27,39 @@ interface ArtWorkshopDb extends DBSchema {
       "by-createdAt": number;
     };
   };
+  "current-image-task": {
+    key: string;
+    value: {
+      key: string;
+      task: ImageTask;
+    };
+  };
   "current-video-task": {
     key: string;
     value: {
       key: string;
       task: VideoTask;
     };
+  };
+}
+
+function prepareImageTaskForStorage(task: ImageTask): ImageTask {
+  const now = Date.now();
+  return {
+    id: String(task.id || ""),
+    createdAt: Number(task.createdAt) || now,
+    updatedAt: Number(task.updatedAt) || now,
+    status: task.status,
+    serverJobId: task.serverJobId ? String(task.serverJobId) : undefined,
+    clientRequestId: task.clientRequestId ? String(task.clientRequestId) : undefined,
+    remoteStatus: task.remoteStatus ? String(task.remoteStatus) : undefined,
+    sourceImages: toPlainStringArray(task.sourceImages),
+    prompt: String(task.prompt || ""),
+    model: task.model,
+    modelConfig: { ...(task.modelConfig || {}) },
+    resultImages: toPlainStringArray(task.resultImages),
+    generationTime: Number(task.generationTime) || 0,
+    error: task.error ? String(task.error) : undefined,
   };
 }
 
@@ -137,6 +166,12 @@ function getDatabase() {
           store.createIndex("by-createdAt", "createdAt");
         }
 
+        if (!database.objectStoreNames.contains(CURRENT_IMAGE_TASK_STORE)) {
+          database.createObjectStore(CURRENT_IMAGE_TASK_STORE, {
+            keyPath: "key",
+          });
+        }
+
         if (!database.objectStoreNames.contains(CURRENT_VIDEO_TASK_STORE)) {
           database.createObjectStore(CURRENT_VIDEO_TASK_STORE, {
             keyPath: "key",
@@ -183,6 +218,25 @@ export async function deleteImageHistoryTask(taskId: string): Promise<void> {
 export async function clearImageHistory(): Promise<void> {
   const database = await getDatabase();
   await database.clear(IMAGE_HISTORY_STORE);
+}
+
+export async function loadCurrentImageTask(): Promise<ImageTask | null> {
+  const database = await getDatabase();
+  const record = await database.get(CURRENT_IMAGE_TASK_STORE, CURRENT_IMAGE_TASK_KEY);
+  return record?.task || null;
+}
+
+export async function saveCurrentImageTask(task: ImageTask): Promise<void> {
+  const database = await getDatabase();
+  await database.put(CURRENT_IMAGE_TASK_STORE, {
+    key: CURRENT_IMAGE_TASK_KEY,
+    task: prepareImageTaskForStorage(task),
+  });
+}
+
+export async function deleteCurrentImageTask(): Promise<void> {
+  const database = await getDatabase();
+  await database.delete(CURRENT_IMAGE_TASK_STORE, CURRENT_IMAGE_TASK_KEY);
 }
 
 export async function loadVideoHistory(limit = 20): Promise<VideoTask[]> {

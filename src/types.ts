@@ -57,7 +57,11 @@ export interface PromptItem {
 export interface ImageTask {
   id: string;
   createdAt: number;
+  updatedAt?: number;
   status: "generating" | "success" | "failed";
+  serverJobId?: string;
+  clientRequestId?: string;
+  remoteStatus?: string;
   sourceImages: string[];
   prompt: string;
   model: ImageModelId;

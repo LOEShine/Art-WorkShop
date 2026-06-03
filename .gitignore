@@ -9,4 +9,4 @@ coverage/
 *.log
 npm-debug.log*
 output/
-
+server-data/

@@ -7,11 +7,14 @@ import {
   VIDEO_TRANSIENT_KEYS,
 } from "@/data/video-models";
 import {
+  deleteCurrentImageTask,
   deleteCurrentVideoTask,
   deleteImageHistoryTask,
+  loadCurrentImageTask,
   loadImageHistory,
   loadCurrentVideoTask,
   loadVideoHistory,
+  saveCurrentImageTask,
   saveCurrentVideoTask,
   saveImageHistoryTask,
   saveVideoHistoryTask,
@@ -142,13 +145,18 @@ export const useAppStore = defineStore("artWorkshop", {
   actions: {
     async hydrateHistory() {
       try {
-        const [imageHistory, videoHistory, currentVideoTask] = await Promise.all([
+        const [imageHistory, videoHistory, currentImageTask, currentVideoTask] = await Promise.all([
           loadImageHistory(HISTORY_LIMIT),
           loadVideoHistory(HISTORY_LIMIT),
+          loadCurrentImageTask(),
           loadCurrentVideoTask(),
         ]);
         this.history = imageHistory;
         this.videoHistory = videoHistory;
+        if (!this.currentTask && currentImageTask) {
+          this.currentTask = currentImageTask;
+          this.isGenerating = currentImageTask.status === "generating";
+        }
         if (!this.videoTask && currentVideoTask) {
           this.videoTask = currentVideoTask;
         }
@@ -252,9 +260,18 @@ export const useAppStore = defineStore("artWorkshop", {
     },
     setCurrentTask(task: ImageTask | null) {
       this.currentTask = task;
+      if (task) {
+        void saveCurrentImageTask(task).catch((error) => {
+          console.error("[history-db] failed to save current image task:", error);
+        });
+      } else {
+        void deleteCurrentImageTask().catch((error) => {
+          console.error("[history-db] failed to clear current image task:", error);
+        });
+      }
     },
     async addHistoryTask(task: ImageTask) {
-      this.history = [task, ...this.history].slice(0, HISTORY_LIMIT);
+      this.history = [task, ...this.history.filter((item) => item.id !== task.id)].slice(0, HISTORY_LIMIT);
       try {
         await saveImageHistoryTask(task, HISTORY_LIMIT);
       } catch (error) {

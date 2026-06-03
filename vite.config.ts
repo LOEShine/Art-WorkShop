@@ -21,6 +21,7 @@ const codexImageProxy = {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
+  const imageJobApiUrl = env.ART_WORKSHOP_IMAGE_JOB_API_URL || "http://127.0.0.1:8787";
   const wavespeedApiKey = env.WAVESPEED_API_KEY || process.env.WAVESPEED_API_KEY || "";
   const wavespeedProxy = {
     target: "https://api.wavespeed.ai",
@@ -47,12 +48,20 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       proxy: {
+        "/api": {
+          target: imageJobApiUrl,
+          changeOrigin: true,
+        },
         "/codex-image-api": codexImageProxy,
         "/wavespeed-api": wavespeedProxy,
       },
     },
     preview: {
       proxy: {
+        "/api": {
+          target: imageJobApiUrl,
+          changeOrigin: true,
+        },
         "/codex-image-api": codexImageProxy,
         "/wavespeed-api": wavespeedProxy,
       },
