@@ -4379,6 +4379,12 @@ onBeforeUnmount(() => {
   letter-spacing: 0;
 }
 
+@supports (height: 100dvh) {
+  .app-shell {
+    min-height: 100dvh;
+  }
+}
+
 .dark .app-shell {
   background-color: hsl(var(--background));
   background-image: none;

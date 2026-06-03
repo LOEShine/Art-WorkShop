@@ -94,6 +94,9 @@ export function extractErrorMessage(value: unknown, seen = new WeakSet<object>()
 
   if (typeof value === "string") {
     const trimmed = value.trim();
+    if (/^<!doctype html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
+      return "";
+    }
     return trimmed && !/^https?:\/\//i.test(trimmed) ? trimmed : "";
   }
 
@@ -143,6 +146,20 @@ function formatNetworkError(error: unknown) {
   }
 
   return error instanceof Error ? error.message : String(error);
+}
+
+function isHtmlErrorResponse(data: unknown): boolean {
+  if (!data || typeof data !== "object") {
+    return false;
+  }
+
+  const raw = (data as Record<string, unknown>).raw;
+  return typeof raw === "string" && /<!doctype html|<html[\s>]|<body[\s>]|nginx/i.test(raw);
+}
+
+function isImageJobApiUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /HTTP 404|404 not found|nginx|接口不可用|后端连接被关闭或不可达|failed to fetch|networkerror|load failed/i.test(message);
 }
 
 function sanitizeHeaders(headers: HeadersInit | undefined): Record<string, string> {
@@ -514,6 +531,9 @@ async function fetchJson<T>(url: string, init: RequestInit = {}): Promise<T> {
 
   if (!response.ok) {
     logApiFailure(url, init, response, data, text);
+    if (isHtmlErrorResponse(data)) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText || "接口不可用"}`);
+    }
     throw new Error(extractErrorMessage(data) || `HTTP ${response.status}`);
   }
 
@@ -1170,8 +1190,17 @@ export async function waitForImageJob(
 }
 
 export async function generateImage(args: GenerateImageArgs): Promise<GenerateImageResult> {
-  const submittedJob = await submitImageJob(args);
-  args.onJobUpdate?.(submittedJob);
+  let submittedJob: ImageJobStatus | null = null;
+
+  try {
+    submittedJob = await submitImageJob(args);
+    args.onJobUpdate?.(submittedJob);
+  } catch (error) {
+    if (isImageJobApiUnavailable(error)) {
+      return generateImageDirect(args);
+    }
+    throw error;
+  }
 
   const finalJob = await waitForImageJob(submittedJob.id, args.onJobUpdate);
   if (finalJob.resultImages.length === 0) {
