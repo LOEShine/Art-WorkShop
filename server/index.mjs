@@ -131,6 +131,96 @@ function dataUrlToBuffer(dataUrl) {
   };
 }
 
+function imageMimeTypeFromFilename(filename) {
+  const ext = path.extname(String(filename || "")).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") {
+    return "image/jpeg";
+  }
+  if (ext === ".webp") {
+    return "image/webp";
+  }
+  if (ext === ".gif") {
+    return "image/gif";
+  }
+  return "image/png";
+}
+
+function bufferToDataUrl({ mimeType, buffer }) {
+  return `data:${mimeType || "image/png"};base64,${buffer.toString("base64")}`;
+}
+
+function parseLocalJobImageSource(source) {
+  const value = String(source || "").trim();
+  if (!value) {
+    return null;
+  }
+
+  let pathname = "";
+  if (value.startsWith("/")) {
+    pathname = value;
+  } else if (/^https?:\/\//i.test(value)) {
+    try {
+      pathname = new URL(value).pathname;
+    } catch {
+      return null;
+    }
+  }
+
+  const parts = pathname.split("/").filter(Boolean);
+  if (parts.length !== 5 || parts[0] !== "api" || parts[1] !== "image-jobs" || parts[3] !== "images") {
+    return null;
+  }
+
+  return {
+    jobId: decodeURIComponent(parts[2] || ""),
+    filename: path.basename(decodeURIComponent(parts[4] || "")),
+  };
+}
+
+async function localJobImageToBuffer(source) {
+  const parsed = parseLocalJobImageSource(source);
+  if (!parsed) {
+    return null;
+  }
+
+  const job = jobs.get(parsed.jobId);
+  if (!job) {
+    throw new Error("参考图结果不存在，请重新上传图片");
+  }
+
+  const resultDir = path.resolve(RESULTS_DIR, sanitizeId(job.userId), sanitizeId(parsed.jobId));
+  const imagePath = path.resolve(resultDir, parsed.filename);
+  if (!imagePath.startsWith(`${resultDir}${path.sep}`)) {
+    throw new Error("参考图路径无效");
+  }
+
+  return {
+    mimeType: imageMimeTypeFromFilename(parsed.filename),
+    buffer: await fs.readFile(imagePath),
+  };
+}
+
+async function sourceImageToBuffer(source) {
+  if (/^data:image\//i.test(String(source || ""))) {
+    return dataUrlToBuffer(source);
+  }
+
+  const localImage = await localJobImageToBuffer(source);
+  if (localImage) {
+    return localImage;
+  }
+
+  throw new Error("图片数据格式无效");
+}
+
+async function normalizeSourceImages(sourceImages) {
+  const normalized = [];
+  for (const source of sourceImages) {
+    normalized.push(bufferToDataUrl(await sourceImageToBuffer(source)));
+  }
+  return normalized;
+}
+
 function getDataUrlImageExtension(dataUrl) {
   const mime = String(dataUrl || "").match(/^data:(image\/[^;]+)/i)?.[1]?.toLowerCase() || "image/png";
   if (mime === "image/jpeg" || mime === "image/jpg") {
@@ -408,7 +498,8 @@ async function generateImages(payload) {
   const model = payload.model;
   const prompt = sanitizeString(payload.prompt, 30000);
   const config = payload.config && typeof payload.config === "object" ? payload.config : {};
-  const sourceImages = Array.isArray(payload.sourceImages) ? payload.sourceImages.filter(Boolean).map(String) : [];
+  const rawSourceImages = Array.isArray(payload.sourceImages) ? payload.sourceImages.filter(Boolean).map(String) : [];
+  const sourceImages = await normalizeSourceImages(rawSourceImages);
   const apiKey = String(payload.apiKey || "");
   const apiBaseUrl = String(payload.apiBaseUrl || "") || VECTOR_API_BASE_URL;
 
