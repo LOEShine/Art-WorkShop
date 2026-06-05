@@ -190,9 +190,15 @@ function getDatabase() {
 export async function loadImageHistory(limit = 20): Promise<ImageTask[]> {
   const database = await getDatabase();
   const tasks = await database.getAll(IMAGE_HISTORY_STORE);
-  return tasks
-    .sort((left, right) => right.createdAt - left.createdAt)
-    .slice(0, limit);
+  const uniqueTasks: ImageTask[] = [];
+
+  for (const task of tasks.sort((left, right) => right.createdAt - left.createdAt)) {
+    if (!uniqueTasks.some((item) => isSameImageTaskIdentity(item, task))) {
+      uniqueTasks.push(task);
+    }
+  }
+
+  return uniqueTasks.slice(0, limit);
 }
 
 export async function saveImageHistoryTask(task: ImageTask, limit = 20): Promise<void> {
@@ -202,9 +208,16 @@ export async function saveImageHistoryTask(task: ImageTask, limit = 20): Promise
   await transaction.store.put(task);
 
   const tasks = await transaction.store.getAll();
-  const overflow = tasks
-    .sort((left, right) => right.createdAt - left.createdAt)
-    .slice(limit);
+  const retainedTasks: ImageTask[] = [];
+  for (const currentTask of [task, ...tasks.filter((item) => item.id !== task.id)]) {
+    if (retainedTasks.some((item) => isSameImageTaskIdentity(item, currentTask))) {
+      await transaction.store.delete(currentTask.id);
+      continue;
+    }
+    retainedTasks.push(currentTask);
+  }
+
+  const overflow = retainedTasks.sort((left, right) => right.createdAt - left.createdAt).slice(limit);
 
   for (const staleTask of overflow) {
     await transaction.store.delete(staleTask.id);
@@ -221,6 +234,19 @@ export async function deleteImageHistoryTask(taskId: string): Promise<void> {
 export async function clearImageHistory(): Promise<void> {
   const database = await getDatabase();
   await database.clear(IMAGE_HISTORY_STORE);
+}
+
+export function isSameImageTaskIdentity(left: ImageTask, right: ImageTask): boolean {
+  if (left.id && right.id && left.id === right.id) {
+    return true;
+  }
+  if (left.serverJobId && right.serverJobId && left.serverJobId === right.serverJobId) {
+    return true;
+  }
+  if (left.clientRequestId && right.clientRequestId && left.clientRequestId === right.clientRequestId) {
+    return true;
+  }
+  return false;
 }
 
 export async function loadCurrentImageTask(): Promise<ImageTask | null> {

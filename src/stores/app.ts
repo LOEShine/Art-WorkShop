@@ -14,6 +14,7 @@ import {
   loadImageHistory,
   loadCurrentVideoTask,
   loadVideoHistory,
+  isSameImageTaskIdentity,
   saveCurrentImageTask,
   saveCurrentVideoTask,
   saveImageHistoryTask,
@@ -271,7 +272,10 @@ export const useAppStore = defineStore("artWorkshop", {
       }
     },
     async addHistoryTask(task: ImageTask) {
-      this.history = [task, ...this.history.filter((item) => item.id !== task.id)].slice(0, HISTORY_LIMIT);
+      this.history = [task, ...this.history.filter((item) => !isSameImageTaskIdentity(item, task))].slice(
+        0,
+        HISTORY_LIMIT,
+      );
       try {
         await saveImageHistoryTask(task, HISTORY_LIMIT);
       } catch (error) {

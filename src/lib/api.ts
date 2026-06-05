@@ -1152,8 +1152,9 @@ export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): Image
   const pending = isImageJobPending(job.status);
   const sameClientRequest =
     !fallback?.clientRequestId || !job.clientRequestId || fallback.clientRequestId === job.clientRequestId;
+  const stableTaskId = job.clientRequestId || fallback?.clientRequestId || fallback?.id || job.id;
   return {
-    id: sameClientRequest ? fallback?.id || job.clientRequestId || job.id : job.clientRequestId || job.id,
+    id: sameClientRequest ? stableTaskId : job.clientRequestId || job.id,
     createdAt: sameClientRequest ? fallback?.createdAt || job.createdAt : job.createdAt,
     updatedAt: job.updatedAt,
     status: job.status === "succeeded" ? "success" : job.status === "failed" ? "failed" : "generating",
@@ -1880,11 +1881,13 @@ export async function pollVideoTask(
 }
 
 export function createImageTask(task: Omit<ImageTask, "id">): ImageTask {
+  const stableTaskId = String(task.clientRequestId || "").trim();
   return {
     ...task,
     id:
-      typeof crypto !== "undefined" && "randomUUID" in crypto
+      stableTaskId ||
+      (typeof crypto !== "undefined" && "randomUUID" in crypto
         ? crypto.randomUUID()
-        : `task-${Date.now()}`,
+        : `task-${Date.now()}`),
   };
 }
