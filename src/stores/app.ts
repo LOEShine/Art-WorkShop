@@ -154,9 +154,11 @@ export const useAppStore = defineStore("artWorkshop", {
         ]);
         this.history = imageHistory;
         this.videoHistory = videoHistory;
-        if (!this.currentTask && currentImageTask) {
+        if (!this.currentTask && currentImageTask?.status === "generating") {
           this.currentTask = currentImageTask;
-          this.isGenerating = currentImageTask.status === "generating";
+          this.isGenerating = true;
+        } else if (currentImageTask) {
+          await deleteCurrentImageTask();
         }
         if (!this.videoTask && currentVideoTask) {
           this.videoTask = currentVideoTask;
@@ -261,7 +263,7 @@ export const useAppStore = defineStore("artWorkshop", {
     },
     setCurrentTask(task: ImageTask | null) {
       this.currentTask = task;
-      if (task) {
+      if (task?.status === "generating") {
         void saveCurrentImageTask(task).catch((error) => {
           console.error("[history-db] failed to save current image task:", error);
         });
@@ -284,7 +286,12 @@ export const useAppStore = defineStore("artWorkshop", {
       this.persist();
     },
     async removeHistoryTask(taskId: string) {
+      const removedTask = this.history.find((task) => task.id === taskId);
       this.history = this.history.filter((task) => task.id !== taskId);
+      if (removedTask && this.currentTask && isSameImageTaskIdentity(removedTask, this.currentTask)) {
+        this.setCurrentTask(null);
+        this.isGenerating = false;
+      }
       try {
         await deleteImageHistoryTask(taskId);
       } catch (error) {

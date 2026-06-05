@@ -33,7 +33,6 @@ import {
 
 import OpenAiIcon from "@/components/icons/OpenAiIcon.vue";
 import InfiniteCanvas from "@/components/InfiniteCanvas.vue";
-import LoadingLottie from "@/components/LoadingLottie.vue";
 import MediaModal from "@/components/MediaModal.vue";
 import MultiAngleThreePreview from "@/components/MultiAngleThreePreview.vue";
 import SettingsModal from "@/components/SettingsModal.vue";
@@ -185,6 +184,7 @@ const historyImageResolutionLabels = ref<Record<string, string>>({});
 const historyVideoResolutionLabels = ref<Record<string, string>>({});
 const historyVideoDurationLabels = ref<Record<string, string>>({});
 const brokenHistoryImageKeys = ref<Set<string>>(new Set());
+const loadedImageSources = ref<Set<string>>(new Set());
 const optimizingPrompt = ref(false);
 const submittingImage = ref(false);
 const submittingVideo = ref(false);
@@ -322,17 +322,8 @@ const currentResultImages = computed(() =>
 const activeResultImage = computed(
   () => currentResultImages.value[activeResultImageIndex.value] || currentResultImages.value[0] || "",
 );
-const currentImageProgressLabel = computed(() => {
-  if (store.currentTask?.progress) {
-    return store.currentTask.progress;
-  }
-  if (store.currentTask?.serverJobId) {
-    return "等待服务器结果";
-  }
-  return store.currentTask?.status === "generating" ? "提交任务中" : "";
-});
 const currentImageProgressPercent = computed(() =>
-  Math.min(Math.max(Math.round(Number(store.currentTask?.progressPercent) || 0), 0), 100),
+  getImageTaskProgressPercent(store.currentTask),
 );
 const promptShimmerText = computed(() =>
   optimizingPrompt.value
@@ -683,12 +674,16 @@ const visibleHistory = computed<GalleryHistoryItem[]>(() => {
     }))
     .filter((item) => item.status === "success" && item.resultImages.length > 0)
     .map((item) => ({ ...item, kind: "image" as const }));
+  const currentImageTask =
+    store.currentTask?.status === "generating"
+      ? [{ ...store.currentTask, kind: "image" as const }]
+      : [];
 
   const videoHistory = store.videoHistory
     .filter((item) => item.phase === "success" && item.videoUrl)
     .map((item) => ({ ...item, kind: "video" as const }));
 
-  return [...imageHistory, ...videoHistory].sort((left, right) => right.createdAt - left.createdAt);
+  return [...currentImageTask, ...imageHistory, ...videoHistory].sort((left, right) => right.createdAt - left.createdAt);
 });
 
 function getGalleryHistoryKey(task: GalleryHistoryItem) {
@@ -707,6 +702,65 @@ function markHistoryImageBroken(task: GalleryHistoryItem, source: string, index:
   const next = new Set(brokenHistoryImageKeys.value);
   next.add(getHistoryImageSourceKey(task.id, source, index));
   brokenHistoryImageKeys.value = next;
+}
+
+function getImageTaskProgressPercent(task?: Pick<ImageTask, "progressPercent"> | null) {
+  return Math.min(Math.max(Math.round(Number(task?.progressPercent) || 0), 0), 100);
+}
+
+function getImageLoadProgressPercent(task?: Pick<ImageTask, "progressPercent" | "status"> | null) {
+  return task?.status === "generating" ? getImageTaskProgressPercent(task) : 100;
+}
+
+function isImageHistoryLoading(task: GalleryHistoryItem) {
+  return task.kind === "image" && task.status === "generating" && task.resultImages.length === 0;
+}
+
+function isImageSourceLoaded(source: string) {
+  const value = String(source || "").trim();
+  return !value || value.startsWith("data:image/") || loadedImageSources.value.has(value);
+}
+
+function markImageSourceLoaded(source: string) {
+  const value = String(source || "").trim();
+  if (!value || loadedImageSources.value.has(value)) {
+    return;
+  }
+
+  const next = new Set(loadedImageSources.value);
+  next.add(value);
+  loadedImageSources.value = next;
+}
+
+function handleCurrentResultImageLoad(source: string) {
+  markImageSourceLoaded(source);
+}
+
+function handleHistoryImageLoad(task: GalleryHistoryItem, source: string, event: Event) {
+  markImageSourceLoaded(source);
+  setHistoryImageResolutionLabel(task, event);
+}
+
+function getImageTaskPlaceholderStyle(task: GalleryHistoryItem) {
+  if (task.kind !== "image") {
+    return {};
+  }
+
+  const size = String(task.modelConfig?.size || "").trim();
+  const match = size.match(/(\d+)\s*[x*]\s*(\d+)/i);
+  if (!match) {
+    return {};
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return {};
+  }
+
+  return {
+    aspectRatio: `${width} / ${height}`,
+  };
 }
 
 function setHistoryImageResolutionLabel(task: GalleryHistoryItem, event: Event) {
@@ -1466,6 +1520,17 @@ function openImageHistoryPreview(task: GalleryHistoryItem) {
   }
 
   openImageGallery(task.resultImages, 0);
+}
+
+function openGalleryHistoryItem(task: GalleryHistoryItem) {
+  if (task.kind === "image") {
+    if (!isImageHistoryLoading(task)) {
+      openImageHistoryPreview(task);
+    }
+    return;
+  }
+
+  openPreview(task.videoUrl, "", "video", false);
 }
 
 function closePreview() {
@@ -3485,25 +3550,11 @@ onBeforeUnmount(() => {
 
                 <div
                   v-else-if="store.currentTask.status === 'generating'"
-                  class="image-result-frame relative flex items-center justify-center overflow-hidden rounded-md bg-muted"
+                  class="image-result-frame image-loading-placeholder"
                 >
-                  <LoadingLottie class="image-result-loading-animation" />
-                  <div class="image-result-loading-status">
-                    <p class="text-xs font-medium text-foreground">
-                      {{ currentImageProgressLabel }}
-                    </p>
-                    <p class="font-mono text-xs font-bold text-muted-foreground">
-                      {{ formatElapsed(currentImageElapsed) }}
-                    </p>
-                    <div class="image-result-progress-track">
-                      <div
-                        class="image-result-progress-fill"
-                        :style="{ width: `${currentImageProgressPercent}%` }"
-                      />
-                    </div>
-                    <p class="font-mono text-[10px] text-muted-foreground">
-                      {{ currentImageProgressPercent }}%
-                    </p>
+                  <div class="image-loading-placeholder-content">
+                    <span>加载中...</span>
+                    <span>{{ currentImageProgressPercent }}%</span>
                   </div>
                 </div>
 
@@ -3517,8 +3568,19 @@ onBeforeUnmount(() => {
                         :src="activeResultImage"
                         :alt="`结果 ${activeResultImageIndex + 1}`"
                         class="h-full w-full cursor-pointer object-contain transition-opacity hover:opacity-90"
+                        :class="isImageSourceLoaded(activeResultImage) ? '' : 'opacity-0'"
+                        @load="handleCurrentResultImageLoad(activeResultImage)"
                         @click="openImageGallery(currentResultImages, activeResultImageIndex)"
                       />
+                      <div
+                        v-if="!isImageSourceLoaded(activeResultImage)"
+                        class="image-loading-placeholder image-loading-placeholder--overlay"
+                      >
+                        <div class="image-loading-placeholder-content">
+                          <span>加载中...</span>
+                          <span>{{ getImageLoadProgressPercent(store.currentTask) }}%</span>
+                        </div>
+                      </div>
                       <template v-if="currentResultImages.length > 1">
                         <button
                           type="button"
@@ -4041,8 +4103,8 @@ onBeforeUnmount(() => {
             ]"
           >
             <div
-              class="cursor-pointer"
-              @click="task.kind === 'image' ? openImageHistoryPreview(task) : openPreview(task.videoUrl, '', 'video', false)"
+              :class="isImageHistoryLoading(task) ? 'cursor-default' : 'cursor-pointer'"
+              @click="openGalleryHistoryItem(task)"
             >
               <div
                 v-if="task.kind === 'image'"
@@ -4050,7 +4112,17 @@ onBeforeUnmount(() => {
                 :class="task.resultImages.length > 1 ? 'history-stack--multiple' : ''"
               >
                 <div
-                  v-if="task.resultImages.length > 1"
+                  v-if="isImageHistoryLoading(task)"
+                  class="history-single-image image-loading-placeholder"
+                  :style="getImageTaskPlaceholderStyle(task)"
+                >
+                  <div class="image-loading-placeholder-content">
+                    <span>加载中...</span>
+                    <span>{{ getImageTaskProgressPercent(task) }}%</span>
+                  </div>
+                </div>
+                <div
+                  v-else-if="task.resultImages.length > 1"
                   class="history-stack-stage"
                 >
                   <img
@@ -4059,10 +4131,20 @@ onBeforeUnmount(() => {
                     :src="image"
                     :alt="`结果 ${index + 1}`"
                     class="history-stack-image"
+                    :class="isImageSourceLoaded(image) ? '' : 'opacity-0'"
                     :style="getHistoryImageStackStyle(index)"
-                    @load="index === 0 ? setHistoryImageResolutionLabel(task, $event) : undefined"
+                    @load="index === 0 ? handleHistoryImageLoad(task, image, $event) : markImageSourceLoaded(image)"
                     @error="markHistoryImageBroken(task, image, index)"
                   />
+                  <div
+                    v-if="!isImageSourceLoaded(getHistoryImageStackItems(task)[0] || '')"
+                    class="image-loading-placeholder image-loading-placeholder--overlay"
+                  >
+                    <div class="image-loading-placeholder-content">
+                      <span>加载中...</span>
+                      <span>{{ getImageLoadProgressPercent(task) }}%</span>
+                    </div>
+                  </div>
                   <div class="history-stack-actions">
                     <button
                       type="button"
@@ -4090,14 +4172,29 @@ onBeforeUnmount(() => {
                     </button>
                   </div>
                 </div>
-                <img
+                <div
                   v-else
-                  :src="getHistoryImagePreview(task)"
-                  alt=""
-                  class="history-single-image w-full transition-opacity hover:opacity-90"
-                  @load="setHistoryImageResolutionLabel(task, $event)"
-                  @error="markHistoryImageBroken(task, getHistoryImagePreview(task), 0)"
-                />
+                  class="history-single-image-shell"
+                  :style="getImageTaskPlaceholderStyle(task)"
+                >
+                  <img
+                    :src="getHistoryImagePreview(task)"
+                    alt=""
+                    class="history-single-image w-full transition-opacity hover:opacity-90"
+                    :class="isImageSourceLoaded(getHistoryImagePreview(task)) ? '' : 'opacity-0'"
+                    @load="handleHistoryImageLoad(task, getHistoryImagePreview(task), $event)"
+                    @error="markHistoryImageBroken(task, getHistoryImagePreview(task), 0)"
+                  />
+                  <div
+                    v-if="!isImageSourceLoaded(getHistoryImagePreview(task))"
+                    class="image-loading-placeholder image-loading-placeholder--overlay"
+                  >
+                    <div class="image-loading-placeholder-content">
+                      <span>加载中...</span>
+                      <span>{{ getImageLoadProgressPercent(task) }}%</span>
+                    </div>
+                  </div>
+                </div>
               </div>
               <video
                 v-else
@@ -4144,7 +4241,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div
-              v-else
+              v-else-if="!isImageHistoryLoading(task)"
               class="pointer-events-none absolute bottom-1 left-1 z-20 flex flex-col items-start gap-1"
             >
               <div class="flex flex-wrap gap-1">
@@ -4186,7 +4283,7 @@ onBeforeUnmount(() => {
             </div>
 
             <div
-              v-if="task.kind !== 'image' || task.resultImages.length <= 1"
+              v-if="(task.kind !== 'image' || task.resultImages.length <= 1) && !isImageHistoryLoading(task)"
               class="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 opacity-0 transition-opacity group-hover:opacity-100"
             >
               <button
@@ -4838,6 +4935,14 @@ onBeforeUnmount(() => {
   object-fit: cover;
 }
 
+.history-single-image-shell {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: hsl(var(--card));
+}
+
 .history-card--video {
   min-height: 8rem;
   background: hsl(0 0% 10%);
@@ -4856,42 +4961,37 @@ onBeforeUnmount(() => {
   color: white;
 }
 
-.image-result-loading-animation {
-  pointer-events: none;
-  position: absolute;
-  left: 50%;
-  top: -30%;
-  height: 150%;
-  width: 150%;
-  transform: translateX(-50%);
+.image-loading-placeholder {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 8rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  background: hsl(var(--muted));
 }
 
-.image-result-loading-status {
-  pointer-events: none;
+.image-loading-placeholder--overlay {
   position: absolute;
-  left: 50%;
-  bottom: 1rem;
+  inset: 0;
+  z-index: 5;
+  height: 100%;
+  min-height: 0;
+}
+
+.image-loading-placeholder-content {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  width: min(12rem, calc(100% - 2rem));
-  transform: translateX(-50%);
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.2;
   text-align: center;
-}
-
-.image-result-progress-track {
-  height: 0.25rem;
-  width: 100%;
-  overflow: hidden;
-  border-radius: 999px;
-  background: hsl(var(--border) / 0.76);
-}
-
-.image-result-progress-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: hsl(var(--foreground));
-  transition: width 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .history-stack {
