@@ -1,6 +1,6 @@
 import http from "node:http";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -13,6 +13,9 @@ const JOBS_DIR = path.join(STORAGE_DIR, "jobs");
 const RESULTS_DIR = path.join(STORAGE_DIR, "results");
 const MAX_BODY_BYTES = Number(process.env.ART_WORKSHOP_MAX_BODY_BYTES || 96 * 1024 * 1024);
 const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.ART_WORKSHOP_IMAGE_JOB_CONCURRENCY || 2));
+const REQUEST_FINGERPRINT_CACHE_TTL_MS = Number(
+  process.env.ART_WORKSHOP_IMAGE_JOB_CACHE_TTL_MS || 15 * 60 * 1000,
+);
 const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
 const CODEX_IMAGE_REMOTE_BASE_URL = "https://sgdr.funai.vip";
 const WAVESPEED_REMOTE_BASE_URL = "https://api.wavespeed.ai/api/v3";
@@ -44,6 +47,36 @@ function sanitizeId(value, fallback = "") {
 
 function sanitizeString(value, maxLength = 20000) {
   return String(value || "").slice(0, maxLength);
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableJson(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableJson(value[key])]),
+    );
+  }
+  return value;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(String(value || "")).digest("hex");
+}
+
+function buildRequestFingerprint({ model, prompt, sourceImages, config, apiBaseUrl }) {
+  return sha256(
+    JSON.stringify({
+      model: String(model || ""),
+      prompt: String(prompt || ""),
+      sourceImages: (Array.isArray(sourceImages) ? sourceImages : []).map((source) => sha256(source)),
+      config: stableJson(config && typeof config === "object" ? config : {}),
+      apiBaseUrl: String(apiBaseUrl || ""),
+    }),
+  );
 }
 
 function buildApiUrl(baseUrl, requestPath) {
@@ -701,8 +734,10 @@ function toPublicJob(job) {
   return {
     id: job.id,
     clientRequestId: job.clientRequestId,
+    requestFingerprint: job.requestFingerprint,
     status: job.status,
     progress: job.progress || "",
+    progressPercent: Number(job.progressPercent) || 0,
     sourceImageCount: job.sourceImageCount || 0,
     prompt: job.prompt || "",
     model: job.model,
@@ -733,6 +768,7 @@ async function loadJobs() {
         job.status = "failed";
         job.error = "服务重启后缺少本次任务的临时 API Key，请重新提交生成。";
         job.progress = "";
+        job.progressPercent = 100;
         job.generationTime = Math.max(0, now() - Number(job.createdAt || now()));
         await saveJob(job);
       }
@@ -762,6 +798,32 @@ function findExistingClientJob(userId, clientRequestId) {
 
   for (const job of jobs.values()) {
     if (job.userId === userId && job.clientRequestId === clientRequestId) {
+      return job;
+    }
+  }
+
+  return null;
+}
+
+function findExistingRequestJob(userId, requestFingerprint) {
+  if (!requestFingerprint) {
+    return null;
+  }
+
+  const cutoff = now() - REQUEST_FINGERPRINT_CACHE_TTL_MS;
+  const userJobs = Array.from(jobs.values())
+    .filter((job) => job.userId === userId && job.requestFingerprint === requestFingerprint)
+    .sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0));
+
+  for (const job of userJobs) {
+    const pending = job.status === "queued" || job.status === "running";
+    const recentlySucceeded =
+      job.status === "succeeded" &&
+      Array.isArray(job.resultImages) &&
+      job.resultImages.length > 0 &&
+      Number(job.updatedAt || job.createdAt || 0) >= cutoff;
+
+    if (pending || recentlySucceeded) {
       return job;
     }
   }
@@ -848,6 +910,7 @@ async function runJob(jobId) {
     job.status = "failed";
     job.error = "任务缺少运行参数，请重新提交。";
     job.progress = "";
+    job.progressPercent = 100;
     job.generationTime = Math.max(0, now() - job.createdAt);
     await saveJob(job);
     return;
@@ -855,27 +918,34 @@ async function runJob(jobId) {
 
   job.status = "running";
   job.progress = "生成中";
+  job.progressPercent = 30;
   await saveJob(job);
 
   const startedAt = now();
   try {
     const images = await generateImages(payload);
     job.progress = "保存结果";
+    job.progressPercent = 82;
     await saveJob(job);
 
     const resultImages = [];
     for (let index = 0; index < images.length; index += 1) {
+      job.progress = `保存结果 ${index + 1}/${images.length}`;
+      job.progressPercent = Math.min(98, 82 + Math.round(((index + 1) / Math.max(images.length, 1)) * 14));
+      await saveJob(job);
       resultImages.push(await persistGeneratedImage(job, images[index], index));
     }
 
     job.status = "succeeded";
     job.progress = "完成";
+    job.progressPercent = 100;
     job.resultImages = resultImages;
     job.error = "";
     job.generationTime = now() - startedAt;
   } catch (error) {
     job.status = "failed";
     job.progress = "";
+    job.progressPercent = 100;
     job.error = error instanceof Error ? error.message : String(error);
     job.generationTime = now() - startedAt;
   } finally {
@@ -928,12 +998,6 @@ async function createImageJob(request, response) {
 
   const body = await readJsonBody(request);
   const clientRequestId = sanitizeId(body.clientRequestId, "");
-  const existingJob = findExistingClientJob(userId, clientRequestId);
-  if (existingJob) {
-    sendJson(response, 200, toPublicJob(existingJob), request);
-    return;
-  }
-
   const model = sanitizeString(body.model, 80);
   const prompt = sanitizeString(body.prompt, 30000);
   if (!model || !prompt.trim()) {
@@ -942,13 +1006,38 @@ async function createImageJob(request, response) {
 
   const sourceImages = Array.isArray(body.sourceImages) ? body.sourceImages.filter(Boolean).map(String) : [];
   const config = body.config && typeof body.config === "object" ? body.config : {};
+  const apiBaseUrl = sanitizeString(body.apiBaseUrl || "", 200);
+  const requestFingerprint =
+    sanitizeId(body.requestFingerprint, "") ||
+    buildRequestFingerprint({
+      model,
+      prompt,
+      sourceImages,
+      config,
+      apiBaseUrl,
+    });
+
+  const existingClientJob = findExistingClientJob(userId, clientRequestId);
+  if (existingClientJob) {
+    sendJson(response, 200, toPublicJob(existingClientJob), request);
+    return;
+  }
+
+  const existingRequestJob = findExistingRequestJob(userId, requestFingerprint);
+  if (existingRequestJob) {
+    sendJson(response, 200, toPublicJob(existingRequestJob), request);
+    return;
+  }
+
   const createdAt = now();
   const job = {
     id: randomUUID(),
     userId,
     clientRequestId,
+    requestFingerprint,
     status: "queued",
     progress: "排队中",
+    progressPercent: 5,
     sourceImageCount: sourceImages.length,
     prompt,
     model,
@@ -966,7 +1055,7 @@ async function createImageJob(request, response) {
     prompt,
     sourceImages,
     config,
-    apiBaseUrl: sanitizeString(body.apiBaseUrl || "", 200),
+    apiBaseUrl,
     apiKey: sanitizeString(body.apiKey || "", 2000),
   });
   await saveJob(job);

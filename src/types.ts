@@ -61,7 +61,10 @@ export interface ImageTask {
   status: "generating" | "success" | "failed";
   serverJobId?: string;
   clientRequestId?: string;
+  requestFingerprint?: string;
   remoteStatus?: string;
+  progress?: string;
+  progressPercent?: number;
   sourceImages: string[];
   prompt: string;
   model: ImageModelId;

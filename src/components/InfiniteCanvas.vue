@@ -42,6 +42,7 @@ import {
 import {
   CODEX_IMAGE_API_BASE_URL,
   createImageTask,
+  createImageRequestFingerprint,
   generateImage,
   imageJobToTask,
   listImageJobs,
@@ -76,6 +77,7 @@ interface CanvasNode {
   error?: string;
   serverJobId?: string;
   clientRequestId?: string;
+  requestFingerprint?: string;
   generationStartedAt?: number;
   generationModel?: ImageModelId;
   generationConfig?: ImageConfigRecord;
@@ -1162,12 +1164,16 @@ function buildCanvasImageTask(
   sourceImages: string[],
   startedAt: number,
   clientRequestId?: string,
+  requestFingerprint?: string,
 ): ImageTask {
   return createImageTask({
     createdAt: startedAt,
     updatedAt: startedAt,
     status: "generating",
     clientRequestId,
+    requestFingerprint,
+    progress: "提交任务中",
+    progressPercent: 1,
     sourceImages,
     prompt,
     model,
@@ -1213,6 +1219,7 @@ function hasResumableCanvasJob(node: CanvasNode) {
 function clearCanvasGenerationState(node: CanvasNode) {
   delete node.serverJobId;
   delete node.clientRequestId;
+  delete node.requestFingerprint;
   delete node.generationStartedAt;
   delete node.generationModel;
   delete node.generationConfig;
@@ -1223,6 +1230,7 @@ function clearCanvasGenerationState(node: CanvasNode) {
 function updateNodeFromImageJob(node: CanvasNode, job: ImageJobStatus) {
   node.serverJobId = job.id || node.serverJobId;
   node.clientRequestId = job.clientRequestId || node.clientRequestId;
+  node.requestFingerprint = job.requestFingerprint || node.requestFingerprint;
   node.generationStartedAt = node.generationStartedAt || job.createdAt;
   node.generationModel = node.generationModel || job.model;
   node.generationConfig = node.generationConfig || { ...(job.modelConfig || {}) };
@@ -1239,6 +1247,7 @@ function createCanvasFallbackTask(node: CanvasNode, job: ImageJobStatus): ImageT
     status: "generating",
     serverJobId: job.id || node.serverJobId,
     clientRequestId: job.clientRequestId || node.clientRequestId,
+    requestFingerprint: job.requestFingerprint || node.requestFingerprint,
     remoteStatus: job.status,
     sourceImages: [],
     prompt: node.generationPrompt || job.prompt || node.prompt || "",
@@ -1427,10 +1436,29 @@ async function runPromptNode(node: CanvasNode) {
     const config = { ...activeImageConfig.value };
     const sourceImages = await buildSourceImages(node);
     const generationPrompt = cleanPromptForGeneration(prompt);
+    const usesCodexImageKey = model === "codex-image-2";
+    const apiBaseUrl = usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl;
+    const apiKey = usesCodexImageKey ? store.codexApiKey : store.apiKey;
+    const requestFingerprint = await createImageRequestFingerprint({
+      model,
+      prompt: generationPrompt,
+      sourceImages,
+      config,
+      apiBaseUrl,
+    });
     const clientRequestId = createClientRequestId();
-    const task = buildCanvasImageTask(generationPrompt, model, config, sourceImages, startedAt, clientRequestId);
+    const task = buildCanvasImageTask(
+      generationPrompt,
+      model,
+      config,
+      sourceImages,
+      startedAt,
+      clientRequestId,
+      requestFingerprint,
+    );
     let latestTask = task;
     node.clientRequestId = clientRequestId;
+    node.requestFingerprint = requestFingerprint;
     node.generationStartedAt = startedAt;
     node.generationModel = model;
     node.generationConfig = { ...config };
@@ -1438,13 +1466,13 @@ async function runPromptNode(node: CanvasNode) {
     node.generationSourceCount = sourceImages.length;
     scheduleSave();
 
-    const usesCodexImageKey = model === "codex-image-2";
     const result = await generateImage({
         model,
         prompt: generationPrompt,
         sourceImages,
         config,
         clientRequestId,
+        requestFingerprint,
         onJobUpdate: (job) => {
           if (activeRuns.get(node.id) !== runId) {
             return;
@@ -1454,8 +1482,8 @@ async function runPromptNode(node: CanvasNode) {
           node.status = latestTask.status === "generating" ? "generating" : node.status;
           scheduleSave();
         },
-        apiBaseUrl: usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl,
-        apiKey: usesCodexImageKey ? store.codexApiKey : store.apiKey,
+        apiBaseUrl,
+        apiKey,
       });
 
     if (activeRuns.get(node.id) !== runId) {

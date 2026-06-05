@@ -23,6 +23,7 @@ interface GenerateImageArgs {
   apiBaseUrl: string;
   apiKey: string;
   clientRequestId?: string;
+  requestFingerprint?: string;
   onJobUpdate?: (job: ImageJobStatus) => void;
 }
 
@@ -33,8 +34,10 @@ interface GenerateImageResult {
 export interface ImageJobStatus {
   id: string;
   clientRequestId?: string;
+  requestFingerprint?: string;
   status: "queued" | "running" | "succeeded" | "failed";
   progress?: string;
+  progressPercent?: number;
   sourceImageCount?: number;
   prompt: string;
   model: ImageModelId;
@@ -77,6 +80,70 @@ export function buildApiUrl(baseUrl: string, path: string): string {
   }
 
   return `${baseUrl.replace(/\/+$/, "")}/${String(path || "").replace(/^\/+/, "")}`;
+}
+
+function stableJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableJson(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>)
+        .sort()
+        .map((key) => [key, stableJson((value as Record<string, unknown>)[key])]),
+    );
+  }
+  return value;
+}
+
+function fallbackHash(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  if (globalThis.crypto?.subtle) {
+    const bytes = new TextEncoder().encode(value);
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest))
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
+  }
+
+  return fallbackHash(value);
+}
+
+export async function createImageRequestFingerprint({
+  apiBaseUrl,
+  config,
+  model,
+  prompt,
+  sourceImages,
+}: {
+  apiBaseUrl: string;
+  config: ImageConfigRecord;
+  model: ImageModelId;
+  prompt: string;
+  sourceImages: string[];
+}): Promise<string> {
+  const sourceFingerprints: string[] = [];
+  for (const source of sourceImages) {
+    sourceFingerprints.push(await sha256Hex(source));
+  }
+
+  return sha256Hex(
+    JSON.stringify({
+      model,
+      prompt,
+      sourceImages: sourceFingerprints,
+      config: stableJson(config || {}),
+      apiBaseUrl,
+    }),
+  );
 }
 
 export function isErrorStatus(status: string): boolean {
@@ -1083,26 +1150,33 @@ export function isImageJobPending(status: string): boolean {
 
 export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): ImageTask {
   const pending = isImageJobPending(job.status);
+  const sameClientRequest =
+    !fallback?.clientRequestId || !job.clientRequestId || fallback.clientRequestId === job.clientRequestId;
   return {
-    id: fallback?.id || job.clientRequestId || job.id,
-    createdAt: fallback?.createdAt || job.createdAt,
+    id: sameClientRequest ? fallback?.id || job.clientRequestId || job.id : job.clientRequestId || job.id,
+    createdAt: sameClientRequest ? fallback?.createdAt || job.createdAt : job.createdAt,
     updatedAt: job.updatedAt,
     status: job.status === "succeeded" ? "success" : job.status === "failed" ? "failed" : "generating",
     serverJobId: job.id,
     clientRequestId: job.clientRequestId || fallback?.clientRequestId,
+    requestFingerprint: job.requestFingerprint || fallback?.requestFingerprint,
     remoteStatus: job.status,
+    progress: job.progress || fallback?.progress,
+    progressPercent: Number(job.progressPercent) || fallback?.progressPercent || (pending ? 10 : 100),
     sourceImages: fallback?.sourceImages || [],
     prompt: fallback?.prompt || job.prompt,
     model: fallback?.model || job.model,
     modelConfig: fallback?.modelConfig || job.modelConfig,
     resultImages: pending ? fallback?.resultImages || [] : job.resultImages,
-    generationTime: job.generationTime || (pending ? Date.now() - (fallback?.createdAt || job.createdAt) : 0),
+    generationTime:
+      job.generationTime ||
+      (pending ? Date.now() - (sameClientRequest ? fallback?.createdAt || job.createdAt : job.createdAt) : 0),
     error: job.error || fallback?.error,
   };
 }
 
 export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobStatus> {
-  const { apiBaseUrl, apiKey, clientRequestId, config, model, prompt, sourceImages } = args;
+  const { apiBaseUrl, apiKey, clientRequestId, config, model, prompt, requestFingerprint, sourceImages } = args;
   if (model !== "qwen-image-edit-multiple-angles") {
     ensureApiKey(apiKey);
   }
@@ -1112,6 +1186,7 @@ export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobS
     headers: getImageJobHeaders(),
     body: JSON.stringify({
       clientRequestId,
+      requestFingerprint,
       model,
       prompt,
       sourceImages,

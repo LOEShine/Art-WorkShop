@@ -61,6 +61,7 @@ import {
 import {
   CODEX_IMAGE_API_BASE_URL,
   createImageTask,
+  createImageRequestFingerprint,
   generateImage,
   imageJobToTask,
   isErrorStatus,
@@ -185,6 +186,7 @@ const historyVideoResolutionLabels = ref<Record<string, string>>({});
 const historyVideoDurationLabels = ref<Record<string, string>>({});
 const brokenHistoryImageKeys = ref<Set<string>>(new Set());
 const optimizingPrompt = ref(false);
+const submittingImage = ref(false);
 const submittingVideo = ref(false);
 const promptTextarea = ref<HTMLTextAreaElement | null>(null);
 const promptSystemRow = ref<HTMLElement | null>(null);
@@ -320,6 +322,18 @@ const currentResultImages = computed(() =>
 const activeResultImage = computed(
   () => currentResultImages.value[activeResultImageIndex.value] || currentResultImages.value[0] || "",
 );
+const currentImageProgressLabel = computed(() => {
+  if (store.currentTask?.progress) {
+    return store.currentTask.progress;
+  }
+  if (store.currentTask?.serverJobId) {
+    return "等待服务器结果";
+  }
+  return store.currentTask?.status === "generating" ? "提交任务中" : "";
+});
+const currentImageProgressPercent = computed(() =>
+  Math.min(Math.max(Math.round(Number(store.currentTask?.progressPercent) || 0), 0), 100),
+);
 const promptShimmerText = computed(() =>
   optimizingPrompt.value
     ? store.prompt.trim() || "正在生成随机提示词..."
@@ -370,6 +384,7 @@ const imageGenerationRequiresSource = computed(() => effectiveImageModelId.value
 const canGenerateImage = computed(
   () =>
     buildEffectiveImagePrompt().length > 0 &&
+    !submittingImage.value &&
     !store.isGenerating &&
     (!imageGenerationRequiresSource.value || buildEffectiveSourceImages().length > 0),
 );
@@ -1061,8 +1076,9 @@ async function restoreLatestServerImageJob() {
 
   try {
     const jobs = await listImageJobs(10);
-    const job = currentTask?.clientRequestId
+    const job = currentTask
       ? jobs.find((item) => item.clientRequestId === currentTask.clientRequestId)
+        || jobs.find((item) => item.requestFingerprint === currentTask.requestFingerprint)
       : jobs[0];
     if (!job) {
       return;
@@ -2538,63 +2554,88 @@ async function handleOptimizePrompt() {
 }
 
 async function handleGenerateImage() {
-  if (!canGenerateImage.value) {
+  if (submittingImage.value || !canGenerateImage.value) {
     return;
   }
 
+  submittingImage.value = true;
   const startedAt = Date.now();
   const imagePrompt = buildEffectiveImagePrompt();
   const generationModel = effectiveImageModelId.value;
   const generationConfig = buildGenerationImageConfig(generationModel);
   const generationPrompt = buildGenerationImagePrompt(generationModel);
   const sourceImages = buildEffectiveSourceImages();
-  const clientRequestId =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `image-${startedAt}`;
-  const task = createImageTask({
-    createdAt: startedAt,
-    updatedAt: startedAt,
-    status: "generating",
-    clientRequestId,
-    sourceImages,
-    prompt: imagePrompt,
-    model: generationModel,
-    modelConfig: { ...generationConfig },
-    resultImages: [],
-    generationTime: 0,
-  });
+  const usesCodexImageKey = generationModel === "codex-image-2";
+  const apiBaseUrl =
+    generationModel === "qwen-image-edit-multiple-angles"
+      ? ""
+      : usesCodexImageKey
+        ? CODEX_IMAGE_API_BASE_URL
+        : store.apiBaseUrl;
+  const apiKey =
+    generationModel === "qwen-image-edit-multiple-angles"
+      ? ""
+      : usesCodexImageKey
+        ? store.codexApiKey
+        : store.apiKey;
 
-  store.setCurrentTask(task);
-  store.setIsGenerating(true);
-
-  let latestTask = task;
+  let latestTask: ImageTask | null = null;
 
   try {
-    const usesCodexImageKey = generationModel === "codex-image-2";
+    const requestFingerprint = await createImageRequestFingerprint({
+      model: generationModel,
+      prompt: generationPrompt,
+      sourceImages,
+      config: generationConfig,
+      apiBaseUrl,
+    });
+
+    if (
+      store.currentTask?.status === "generating" &&
+      store.currentTask.requestFingerprint === requestFingerprint
+    ) {
+      resumeImageWork();
+      return;
+    }
+
+    const clientRequestId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `image-${startedAt}`;
+    const task = createImageTask({
+      createdAt: startedAt,
+      updatedAt: startedAt,
+      status: "generating",
+      clientRequestId,
+      requestFingerprint,
+      progress: "提交任务中",
+      progressPercent: 1,
+      sourceImages,
+      prompt: imagePrompt,
+      model: generationModel,
+      modelConfig: { ...generationConfig },
+      resultImages: [],
+      generationTime: 0,
+    });
+
+    latestTask = task;
+    store.setCurrentTask(task);
+    store.setIsGenerating(true);
+
     const result = await generateImage({
       model: generationModel,
       prompt: generationPrompt,
       sourceImages,
       config: generationConfig,
       clientRequestId,
+      requestFingerprint,
       onJobUpdate: (job) => {
         latestTask = imageJobToTask(job, task);
         store.setCurrentTask(latestTask);
         store.setIsGenerating(latestTask.status === "generating");
       },
-      apiBaseUrl:
-        generationModel === "qwen-image-edit-multiple-angles"
-          ? ""
-          : usesCodexImageKey
-            ? CODEX_IMAGE_API_BASE_URL
-            : store.apiBaseUrl,
-      apiKey:
-        generationModel === "qwen-image-edit-multiple-angles"
-          ? ""
-          : usesCodexImageKey
-            ? store.codexApiKey
-            : store.apiKey,
+      apiBaseUrl,
+      apiKey,
     });
 
     const finalTask: ImageTask = {
@@ -2610,7 +2651,7 @@ async function handleGenerateImage() {
     store.addHistoryTask(finalTask);
   } catch (error) {
     const message = error instanceof Error ? error.message : "未知错误";
-    if (latestTask.serverJobId && /仍在服务器运行/.test(message)) {
+    if (latestTask?.serverJobId && /仍在服务器运行/.test(message)) {
       store.setCurrentTask({
         ...latestTask,
         status: "generating",
@@ -2623,7 +2664,17 @@ async function handleGenerateImage() {
     }
 
     const finalTask: ImageTask = {
-      ...latestTask,
+      ...(latestTask || createImageTask({
+        createdAt: startedAt,
+        updatedAt: Date.now(),
+        status: "generating",
+        sourceImages,
+        prompt: imagePrompt,
+        model: generationModel,
+        modelConfig: { ...generationConfig },
+        resultImages: [],
+        generationTime: 0,
+      })),
       status: "failed",
       generationTime: Date.now() - startedAt,
       updatedAt: Date.now(),
@@ -2633,6 +2684,7 @@ async function handleGenerateImage() {
     store.setCurrentTask(finalTask);
     store.addHistoryTask(finalTask);
   } finally {
+    submittingImage.value = false;
     store.setIsGenerating(store.currentTask?.status === "generating");
   }
 }
@@ -3437,8 +3489,20 @@ onBeforeUnmount(() => {
                 >
                   <LoadingLottie class="image-result-loading-animation" />
                   <div class="image-result-loading-status">
+                    <p class="text-xs font-medium text-foreground">
+                      {{ currentImageProgressLabel }}
+                    </p>
                     <p class="font-mono text-xs font-bold text-muted-foreground">
                       {{ formatElapsed(currentImageElapsed) }}
+                    </p>
+                    <div class="image-result-progress-track">
+                      <div
+                        class="image-result-progress-fill"
+                        :style="{ width: `${currentImageProgressPercent}%` }"
+                      />
+                    </div>
+                    <p class="font-mono text-[10px] text-muted-foreground">
+                      {{ currentImageProgressPercent }}%
                     </p>
                   </div>
                 </div>
@@ -4806,9 +4870,28 @@ onBeforeUnmount(() => {
   pointer-events: none;
   position: absolute;
   left: 50%;
-  top: 82%;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: min(12rem, calc(100% - 2rem));
   transform: translateX(-50%);
   text-align: center;
+}
+
+.image-result-progress-track {
+  height: 0.25rem;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: hsl(var(--border) / 0.76);
+}
+
+.image-result-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: hsl(var(--foreground));
+  transition: width 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .history-stack {
