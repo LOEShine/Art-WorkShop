@@ -33,6 +33,7 @@ import {
 
 import OpenAiIcon from "@/components/icons/OpenAiIcon.vue";
 import InfiniteCanvas from "@/components/InfiniteCanvas.vue";
+import LoadingLottie from "@/components/LoadingLottie.vue";
 import MediaModal from "@/components/MediaModal.vue";
 import MultiAngleThreePreview from "@/components/MultiAngleThreePreview.vue";
 import SettingsModal from "@/components/SettingsModal.vue";
@@ -185,6 +186,7 @@ const historyVideoResolutionLabels = ref<Record<string, string>>({});
 const historyVideoDurationLabels = ref<Record<string, string>>({});
 const brokenHistoryImageKeys = ref<Set<string>>(new Set());
 const loadedImageSources = ref<Set<string>>(new Set());
+const preloadingImageSources = ref<Set<string>>(new Set());
 const optimizingPrompt = ref(false);
 const submittingImage = ref(false);
 const submittingVideo = ref(false);
@@ -322,6 +324,15 @@ const currentResultImages = computed(() =>
 const activeResultImage = computed(
   () => currentResultImages.value[activeResultImageIndex.value] || currentResultImages.value[0] || "",
 );
+const currentImageProgressLabel = computed(() => {
+  if (store.currentTask?.progress) {
+    return store.currentTask.progress;
+  }
+  if (store.currentTask?.serverJobId) {
+    return "等待服务器结果";
+  }
+  return store.currentTask?.status === "generating" ? "提交任务中" : "";
+});
 const currentImageProgressPercent = computed(() =>
   getImageTaskProgressPercent(store.currentTask),
 );
@@ -674,16 +685,12 @@ const visibleHistory = computed<GalleryHistoryItem[]>(() => {
     }))
     .filter((item) => item.status === "success" && item.resultImages.length > 0)
     .map((item) => ({ ...item, kind: "image" as const }));
-  const currentImageTask =
-    store.currentTask?.status === "generating"
-      ? [{ ...store.currentTask, kind: "image" as const }]
-      : [];
 
   const videoHistory = store.videoHistory
     .filter((item) => item.phase === "success" && item.videoUrl)
     .map((item) => ({ ...item, kind: "video" as const }));
 
-  return [...currentImageTask, ...imageHistory, ...videoHistory].sort((left, right) => right.createdAt - left.createdAt);
+  return [...imageHistory, ...videoHistory].sort((left, right) => right.createdAt - left.createdAt);
 });
 
 function getGalleryHistoryKey(task: GalleryHistoryItem) {
@@ -723,13 +730,41 @@ function isImageSourceLoaded(source: string) {
 
 function markImageSourceLoaded(source: string) {
   const value = String(source || "").trim();
-  if (!value || loadedImageSources.value.has(value)) {
+  if (!value) {
     return;
   }
 
-  const next = new Set(loadedImageSources.value);
-  next.add(value);
-  loadedImageSources.value = next;
+  if (!loadedImageSources.value.has(value)) {
+    const next = new Set(loadedImageSources.value);
+    next.add(value);
+    loadedImageSources.value = next;
+  }
+
+  if (preloadingImageSources.value.has(value)) {
+    const loading = new Set(preloadingImageSources.value);
+    loading.delete(value);
+    preloadingImageSources.value = loading;
+  }
+}
+
+function preloadImageSource(source: string) {
+  const value = String(source || "").trim();
+  if (!value || value.startsWith("data:image/") || loadedImageSources.value.has(value) || preloadingImageSources.value.has(value)) {
+    return;
+  }
+
+  const loading = new Set(preloadingImageSources.value);
+  loading.add(value);
+  preloadingImageSources.value = loading;
+
+  const image = new Image();
+  image.onload = () => markImageSourceLoaded(value);
+  image.onerror = () => markImageSourceLoaded(value);
+  image.src = value;
+
+  if (image.complete) {
+    markImageSourceLoaded(value);
+  }
 }
 
 function handleCurrentResultImageLoad(source: string) {
@@ -1003,10 +1038,19 @@ watch(
 );
 
 watch(currentResultImages, (images) => {
+  images.forEach(preloadImageSource);
   if (activeResultImageIndex.value >= images.length) {
     activeResultImageIndex.value = Math.max(images.length - 1, 0);
   }
-});
+}, { immediate: true });
+
+watch(visibleHistory, (items) => {
+  items.forEach((item) => {
+    if (item.kind === "image") {
+      item.resultImages.forEach(preloadImageSource);
+    }
+  });
+}, { immediate: true });
 
 watch(
   () => [
@@ -3550,11 +3594,25 @@ onBeforeUnmount(() => {
 
                 <div
                   v-else-if="store.currentTask.status === 'generating'"
-                  class="image-result-frame image-loading-placeholder"
+                  class="image-result-frame relative flex items-center justify-center overflow-hidden rounded-md bg-muted"
                 >
-                  <div class="image-loading-placeholder-content">
-                    <span>加载中...</span>
-                    <span>{{ currentImageProgressPercent }}%</span>
+                  <LoadingLottie class="image-result-loading-animation" />
+                  <div class="image-result-loading-status">
+                    <p class="text-xs font-medium text-foreground">
+                      {{ currentImageProgressLabel }}
+                    </p>
+                    <p class="font-mono text-xs font-bold text-muted-foreground">
+                      {{ formatElapsed(currentImageElapsed) }}
+                    </p>
+                    <div class="image-result-progress-track">
+                      <div
+                        class="image-result-progress-fill"
+                        :style="{ width: `${currentImageProgressPercent}%` }"
+                      />
+                    </div>
+                    <p class="font-mono text-[10px] text-muted-foreground">
+                      {{ currentImageProgressPercent }}%
+                    </p>
                   </div>
                 </div>
 
@@ -3570,6 +3628,7 @@ onBeforeUnmount(() => {
                         class="h-full w-full cursor-pointer object-contain transition-opacity hover:opacity-90"
                         :class="isImageSourceLoaded(activeResultImage) ? '' : 'opacity-0'"
                         @load="handleCurrentResultImageLoad(activeResultImage)"
+                        @error="markImageSourceLoaded(activeResultImage)"
                         @click="openImageGallery(currentResultImages, activeResultImageIndex)"
                       />
                       <div
@@ -4134,7 +4193,7 @@ onBeforeUnmount(() => {
                     :class="isImageSourceLoaded(image) ? '' : 'opacity-0'"
                     :style="getHistoryImageStackStyle(index)"
                     @load="index === 0 ? handleHistoryImageLoad(task, image, $event) : markImageSourceLoaded(image)"
-                    @error="markHistoryImageBroken(task, image, index)"
+                    @error="markImageSourceLoaded(image); markHistoryImageBroken(task, image, index)"
                   />
                   <div
                     v-if="!isImageSourceLoaded(getHistoryImageStackItems(task)[0] || '')"
@@ -4183,7 +4242,7 @@ onBeforeUnmount(() => {
                     class="history-single-image w-full transition-opacity hover:opacity-90"
                     :class="isImageSourceLoaded(getHistoryImagePreview(task)) ? '' : 'opacity-0'"
                     @load="handleHistoryImageLoad(task, getHistoryImagePreview(task), $event)"
-                    @error="markHistoryImageBroken(task, getHistoryImagePreview(task), 0)"
+                    @error="markImageSourceLoaded(getHistoryImagePreview(task)); markHistoryImageBroken(task, getHistoryImagePreview(task), 0)"
                   />
                   <div
                     v-if="!isImageSourceLoaded(getHistoryImagePreview(task))"
@@ -4959,6 +5018,44 @@ onBeforeUnmount(() => {
 
 .history-card--video .pointer-events-none.absolute.inset-0 {
   color: white;
+}
+
+.image-result-loading-animation {
+  pointer-events: none;
+  position: absolute;
+  left: 50%;
+  top: -30%;
+  height: 150%;
+  width: 150%;
+  transform: translateX(-50%);
+}
+
+.image-result-loading-status {
+  pointer-events: none;
+  position: absolute;
+  left: 50%;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  width: min(12rem, calc(100% - 2rem));
+  transform: translateX(-50%);
+  text-align: center;
+}
+
+.image-result-progress-track {
+  height: 0.25rem;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: hsl(var(--border) / 0.76);
+}
+
+.image-result-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: hsl(var(--foreground));
+  transition: width 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .image-loading-placeholder {
