@@ -3486,7 +3486,7 @@ onBeforeUnmount(() => {
                 >
                   <LoadingLottie class="image-result-loading-animation" />
                   <div class="image-result-loading-status">
-                    <p class="font-mono text-xs font-bold text-muted-foreground">
+                    <p class="image-result-loading-time font-mono text-xs font-bold">
                       {{ formatElapsed(currentImageElapsed) }}
                     </p>
                   </div>
@@ -4859,6 +4859,10 @@ onBeforeUnmount(() => {
   width: min(12rem, calc(100% - 2rem));
   transform: translateX(-50%);
   text-align: center;
+}
+
+.image-result-loading-time {
+  color: #7d8796;
 }
 
 .history-stack {
