@@ -1172,7 +1172,7 @@ function buildCanvasImageTask(
     status: "generating",
     clientRequestId,
     requestFingerprint,
-    progress: "提交任务中",
+    progress: "",
     progressPercent: 1,
     sourceImages,
     prompt,
