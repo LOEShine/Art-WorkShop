@@ -322,18 +322,6 @@ const currentResultImages = computed(() =>
 const activeResultImage = computed(
   () => currentResultImages.value[activeResultImageIndex.value] || currentResultImages.value[0] || "",
 );
-const currentImageProgressLabel = computed(() => {
-  if (store.currentTask?.progress) {
-    return store.currentTask.progress;
-  }
-  if (store.currentTask?.serverJobId) {
-    return "等待服务器结果";
-  }
-  return store.currentTask?.status === "generating" ? "提交任务中" : "";
-});
-const currentImageProgressPercent = computed(() =>
-  getImageTaskProgressPercent(store.currentTask),
-);
 const promptShimmerText = computed(() =>
   optimizingPrompt.value
     ? store.prompt.trim() || "正在生成随机提示词..."
@@ -707,10 +695,6 @@ function markHistoryImageBroken(task: GalleryHistoryItem, source: string, index:
   const next = new Set(brokenHistoryImageKeys.value);
   next.add(getHistoryImageSourceKey(task.id, source, index));
   brokenHistoryImageKeys.value = next;
-}
-
-function getImageTaskProgressPercent(task?: Pick<ImageTask, "progressPercent"> | null) {
-  return Math.min(Math.max(Math.round(Number(task?.progressPercent) || 0), 0), 100);
 }
 
 function setHistoryImageResolutionLabel(task: GalleryHistoryItem, event: Event) {
@@ -3502,20 +3486,8 @@ onBeforeUnmount(() => {
                 >
                   <LoadingLottie class="image-result-loading-animation" />
                   <div class="image-result-loading-status">
-                    <p class="text-xs font-medium text-foreground">
-                      {{ currentImageProgressLabel }}
-                    </p>
                     <p class="font-mono text-xs font-bold text-muted-foreground">
                       {{ formatElapsed(currentImageElapsed) }}
-                    </p>
-                    <div class="image-result-progress-track">
-                      <div
-                        class="image-result-progress-fill"
-                        :style="{ width: `${currentImageProgressPercent}%` }"
-                      />
-                    </div>
-                    <p class="font-mono text-[10px] text-muted-foreground">
-                      {{ currentImageProgressPercent }}%
                     </p>
                   </div>
                 </div>
@@ -4884,27 +4856,9 @@ onBeforeUnmount(() => {
   position: absolute;
   left: 50%;
   bottom: 1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
   width: min(12rem, calc(100% - 2rem));
   transform: translateX(-50%);
   text-align: center;
-}
-
-.image-result-progress-track {
-  height: 0.25rem;
-  width: 100%;
-  overflow: hidden;
-  border-radius: 999px;
-  background: hsl(var(--border) / 0.76);
-}
-
-.image-result-progress-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: hsl(var(--foreground));
-  transition: width 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .history-stack {
