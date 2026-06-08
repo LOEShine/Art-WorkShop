@@ -62,6 +62,14 @@ export interface ImagePromptMetadata {
   sourceImageCount: number;
 }
 
+export interface ImageReferenceAsset {
+  index: number;
+  url: string;
+  kind: "uploaded" | "generated";
+  filename?: string;
+  sourceJobId?: string;
+}
+
 export interface ImageTask {
   id: string;
   createdAt: number;
@@ -76,6 +84,7 @@ export interface ImageTask {
   sourceImages: string[];
   prompt: string;
   promptMetadata?: ImagePromptMetadata;
+  referenceImages?: ImageReferenceAsset[];
   model: ImageModelId;
   modelConfig: ImageConfigRecord;
   resultImages: string[];

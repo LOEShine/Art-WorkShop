@@ -10,6 +10,7 @@ import type {
   ImageConfigRecord,
   ImageModelId,
   ImagePromptMetadata,
+  ImageReferenceAsset,
   ImageTask,
   VideoConfigRecord,
   VideoModelId,
@@ -43,6 +44,7 @@ export interface ImageJobStatus {
   sourceImageCount?: number;
   prompt: string;
   promptMetadata?: ImagePromptMetadata;
+  referenceImages?: ImageReferenceAsset[];
   model: ImageModelId;
   modelConfig: ImageConfigRecord;
   resultImages: string[];
@@ -1221,6 +1223,7 @@ export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): Image
     sourceImages: fallback?.sourceImages || [],
     prompt: fallback?.prompt || job.prompt,
     promptMetadata: fallback?.promptMetadata || job.promptMetadata,
+    referenceImages: job.referenceImages || fallback?.referenceImages,
     model: fallback?.model || job.model,
     modelConfig: fallback?.modelConfig || job.modelConfig,
     resultImages: pending ? fallback?.resultImages || [] : job.resultImages,

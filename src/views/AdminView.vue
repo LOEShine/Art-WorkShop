@@ -163,6 +163,18 @@ function getSourceImageCount(job: AdminImageJob) {
     : Number(job.sourceImageCount) || 0;
 }
 
+function getReferenceImages(job: AdminImageJob) {
+  return Array.isArray(job.referenceImages) ? job.referenceImages.filter((reference) => reference.url) : [];
+}
+
+function hasAnyPreviewImages(job: AdminImageJob) {
+  return Boolean(job.resultImages.length || getReferenceImages(job).length);
+}
+
+function hasMissingReferencePreviews(job: AdminImageJob) {
+  return getSourceImageCount(job) > 0 && getReferenceImages(job).length === 0;
+}
+
 function hasSubmittedPromptDetails(job: AdminImageJob) {
   const submittedPrompt = getSubmittedPrompt(job);
   return Boolean(submittedPrompt && submittedPrompt !== getUserPrompt(job));
@@ -267,9 +279,9 @@ function showNextPage() {
   void loadJobs();
 }
 
-function openPreview(job: AdminImageJob, image: string, index: number) {
+function openPreview(job: AdminImageJob, image: string, index: number, label = "结果图") {
   previewImage.value = image;
-  previewTitle.value = `${shortId(job.userId)} / ${formatDate(job.createdAt)} / ${index + 1}`;
+  previewTitle.value = `${shortId(job.userId)} / ${formatDate(job.createdAt)} / ${label} ${index + 1}`;
 }
 
 function closePreview() {
@@ -498,21 +510,39 @@ onMounted(() => {
               :key="job.id"
             >
               <td class="admin-images-cell">
-                <div
-                  v-if="job.resultImages.length"
-                  class="admin-image-strip"
-                >
-                  <button
-                    v-for="(image, index) in job.resultImages.slice(0, 4)"
-                    :key="`${job.id}-${image}`"
-                    type="button"
-                    @click="openPreview(job, image, index)"
-                  >
-                    <img
-                      :src="image"
-                      :alt="`结果图 ${index + 1}`"
-                    />
-                  </button>
+                <div v-if="hasAnyPreviewImages(job)" class="admin-media-stack">
+                  <div v-if="job.resultImages.length" class="admin-media-group">
+                    <span class="admin-media-label">结果图</span>
+                    <div class="admin-image-strip">
+                      <button
+                        v-for="(image, index) in job.resultImages.slice(0, 4)"
+                        :key="`${job.id}-${image}`"
+                        type="button"
+                        @click="openPreview(job, image, index)"
+                      >
+                        <img
+                          :src="image"
+                          :alt="`结果图 ${index + 1}`"
+                        />
+                      </button>
+                    </div>
+                  </div>
+                  <div v-if="getReferenceImages(job).length" class="admin-media-group">
+                    <span class="admin-media-label">参考图</span>
+                    <div class="admin-image-strip admin-reference-strip">
+                      <button
+                        v-for="(reference, index) in getReferenceImages(job).slice(0, 4)"
+                        :key="`${job.id}-reference-${reference.url}`"
+                        type="button"
+                        @click="openPreview(job, reference.url, index, '参考图')"
+                      >
+                        <img
+                          :src="reference.url"
+                          :alt="`参考图 ${index + 1}`"
+                        />
+                      </button>
+                    </div>
+                  </div>
                 </div>
                 <div
                   v-else
@@ -545,6 +575,7 @@ onMounted(() => {
                   class="admin-reference-count"
                 >
                   参考图 {{ getSourceImageCount(job) }} 张
+                  <span v-if="hasMissingReferencePreviews(job)">，旧记录未保存预览</span>
                 </p>
                 <p
                   v-if="job.error"
@@ -615,6 +646,25 @@ onMounted(() => {
                 />
               </button>
             </div>
+            <div
+              v-if="getReferenceImages(job).length"
+              class="admin-mobile-reference-group"
+            >
+              <span class="admin-media-label">参考图</span>
+              <div class="admin-card-images admin-reference-strip">
+                <button
+                  v-for="(reference, index) in getReferenceImages(job).slice(0, 3)"
+                  :key="`${job.id}-mobile-reference-${reference.url}`"
+                  type="button"
+                  @click="openPreview(job, reference.url, index, '参考图')"
+                >
+                  <img
+                    :src="reference.url"
+                    :alt="`参考图 ${index + 1}`"
+                  />
+                </button>
+              </div>
+            </div>
             <div class="admin-prompt-block">
               <span class="admin-field-label">用户提示词</span>
               <p class="admin-prompt">{{ getUserPrompt(job) || "-" }}</p>
@@ -638,6 +688,7 @@ onMounted(() => {
               class="admin-reference-count"
             >
               参考图 {{ getSourceImageCount(job) }} 张
+              <span v-if="hasMissingReferencePreviews(job)">，旧记录未保存预览</span>
             </p>
             <p
               v-if="job.error"
@@ -984,7 +1035,23 @@ onMounted(() => {
 }
 
 .admin-images-cell {
-  width: 12rem;
+  width: 13rem;
+}
+
+.admin-media-stack {
+  display: grid;
+  gap: 0.625rem;
+}
+
+.admin-media-group {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.admin-media-label {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.68rem;
+  font-weight: 700;
 }
 
 .admin-image-strip,
@@ -1004,6 +1071,10 @@ onMounted(() => {
 .admin-image-strip button {
   height: 3.5rem;
   width: 3.5rem;
+}
+
+.admin-reference-strip button {
+  border-color: hsl(var(--primary) / 0.32);
 }
 
 .admin-image-strip img,
@@ -1281,6 +1352,12 @@ onMounted(() => {
   }
 
   .admin-card-images {
+    margin-bottom: 0.75rem;
+  }
+
+  .admin-mobile-reference-group {
+    display: grid;
+    gap: 0.35rem;
     margin-bottom: 0.75rem;
   }
 

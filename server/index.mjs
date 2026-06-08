@@ -11,6 +11,7 @@ const HOST = process.env.ART_WORKSHOP_API_HOST || "127.0.0.1";
 const STORAGE_DIR = path.resolve(process.env.ART_WORKSHOP_STORAGE_DIR || path.join(ROOT_DIR, "server-data"));
 const JOBS_DIR = path.join(STORAGE_DIR, "jobs");
 const RESULTS_DIR = path.join(STORAGE_DIR, "results");
+const REFERENCES_DIR = path.join(STORAGE_DIR, "references");
 const MAX_BODY_BYTES = Number(process.env.ART_WORKSHOP_MAX_BODY_BYTES || 96 * 1024 * 1024);
 const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.ART_WORKSHOP_IMAGE_JOB_CONCURRENCY || 2));
 const REQUEST_FINGERPRINT_CACHE_TTL_MS = Number(
@@ -230,6 +231,10 @@ function parseLocalJobImageSource(source) {
     jobId: decodeURIComponent(parts[2] || ""),
     filename: path.basename(decodeURIComponent(parts[4] || "")),
   };
+}
+
+function buildLocalJobImageUrl(parsed) {
+  return `/api/image-jobs/${encodeURIComponent(parsed.jobId)}/images/${encodeURIComponent(parsed.filename)}`;
 }
 
 async function localJobImageToBuffer(source) {
@@ -741,6 +746,7 @@ async function generateImages(payload) {
 async function ensureStorage() {
   await fs.mkdir(JOBS_DIR, { recursive: true });
   await fs.mkdir(RESULTS_DIR, { recursive: true });
+  await fs.mkdir(REFERENCES_DIR, { recursive: true });
 }
 
 function getJobFile(jobId) {
@@ -771,6 +777,7 @@ function toPublicJob(job) {
     },
     model: job.model,
     modelConfig: job.modelConfig || {},
+    referenceImages: Array.isArray(job.referenceImages) ? job.referenceImages : [],
     resultImages: job.resultImages || [],
     generationTime: job.generationTime || 0,
     error: job.error || "",
@@ -984,6 +991,46 @@ function processQueue() {
   }
 }
 
+async function persistReferenceImages(job, sourceImages) {
+  const references = [];
+  const referenceDir = path.join(REFERENCES_DIR, sanitizeId(job.userId), sanitizeId(job.id));
+
+  for (let index = 0; index < sourceImages.length; index += 1) {
+    const source = String(sourceImages[index] || "").trim();
+    if (!source) {
+      continue;
+    }
+
+    const parsedLocalImage = parseLocalJobImageSource(source);
+    if (parsedLocalImage) {
+      references.push({
+        index,
+        kind: "generated",
+        url: buildLocalJobImageUrl(parsedLocalImage),
+        sourceJobId: parsedLocalImage.jobId,
+        filename: parsedLocalImage.filename,
+      });
+      continue;
+    }
+
+    if (/^data:image\//i.test(source)) {
+      const decoded = dataUrlToBuffer(source);
+      const extension = getDataUrlImageExtension(source);
+      const filename = `${String(index + 1).padStart(2, "0")}.${extension}`;
+      await fs.mkdir(referenceDir, { recursive: true });
+      await fs.writeFile(path.join(referenceDir, filename), decoded.buffer);
+      references.push({
+        index,
+        kind: "uploaded",
+        url: `/api/image-jobs/${encodeURIComponent(job.id)}/references/${encodeURIComponent(filename)}`,
+        filename,
+      });
+    }
+  }
+
+  return references;
+}
+
 async function persistGeneratedImage(job, source, index) {
   const resultDir = path.join(RESULTS_DIR, sanitizeId(job.userId), sanitizeId(job.id));
   await fs.mkdir(resultDir, { recursive: true });
@@ -1181,6 +1228,7 @@ async function createImageJob(request, response) {
     createdAt,
     updatedAt: createdAt,
   };
+  job.referenceImages = await persistReferenceImages(job, sourceImages);
 
   jobs.set(job.id, job);
   runtimePayloads.set(job.id, {
@@ -1263,6 +1311,7 @@ function listAdminJobs(request, response) {
         job.promptMetadata?.userPrompt,
         job.promptMetadata?.submittedPrompt,
         job.promptMetadata?.referenceText,
+        ...(Array.isArray(job.referenceImages) ? job.referenceImages.map((reference) => reference.url) : []),
         job.model,
         job.status,
         job.error,
@@ -1301,6 +1350,17 @@ function getUserJob(request, response, jobId) {
   sendJson(response, 200, toPublicJob(job), request);
 }
 
+function getImageContentType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  return ext === ".jpg" || ext === ".jpeg"
+    ? "image/jpeg"
+    : ext === ".webp"
+      ? "image/webp"
+      : ext === ".gif"
+        ? "image/gif"
+        : "image/png";
+}
+
 async function serveJobImage(request, response, jobId, filename) {
   const job = jobs.get(jobId);
   if (!job) {
@@ -1309,18 +1369,37 @@ async function serveJobImage(request, response, jobId, filename) {
 
   const safeFilename = path.basename(filename);
   const imagePath = path.join(RESULTS_DIR, sanitizeId(job.userId), sanitizeId(jobId), safeFilename);
-  const ext = path.extname(safeFilename).toLowerCase();
-  const contentType =
-    ext === ".jpg" || ext === ".jpeg"
-      ? "image/jpeg"
-      : ext === ".webp"
-        ? "image/webp"
-        : ext === ".gif"
-          ? "image/gif"
-          : "image/png";
   const data = await fs.readFile(imagePath);
   response.writeHead(200, {
-    "Content-Type": contentType,
+    "Content-Type": getImageContentType(safeFilename),
+    "Cache-Control": "public, max-age=31536000, immutable",
+  });
+  response.end(data);
+}
+
+async function serveJobReferenceImage(request, response, jobId, filename) {
+  const job = jobs.get(jobId);
+  if (!job) {
+    throw new HttpError(404, "参考图不存在");
+  }
+
+  const safeFilename = path.basename(filename);
+  const reference = Array.isArray(job.referenceImages)
+    ? job.referenceImages.find((item) => item.kind === "uploaded" && item.filename === safeFilename)
+    : null;
+  if (!reference) {
+    throw new HttpError(404, "参考图不存在");
+  }
+
+  const referenceDir = path.resolve(REFERENCES_DIR, sanitizeId(job.userId), sanitizeId(jobId));
+  const imagePath = path.resolve(referenceDir, safeFilename);
+  if (!imagePath.startsWith(`${referenceDir}${path.sep}`)) {
+    throw new HttpError(404, "参考图不存在");
+  }
+
+  const data = await fs.readFile(imagePath);
+  response.writeHead(200, {
+    "Content-Type": getImageContentType(safeFilename),
     "Cache-Control": "public, max-age=31536000, immutable",
   });
   response.end(data);
@@ -1366,6 +1445,10 @@ async function handleRequest(request, response) {
     }
     if (request.method === "GET" && parts.length === 5 && parts[3] === "images") {
       await serveJobImage(request, response, parts[2], decodeURIComponent(parts[4]));
+      return;
+    }
+    if (request.method === "GET" && parts.length === 5 && parts[3] === "references") {
+      await serveJobReferenceImage(request, response, parts[2], decodeURIComponent(parts[4]));
       return;
     }
   }

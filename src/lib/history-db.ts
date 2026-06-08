@@ -67,6 +67,17 @@ function prepareImageTaskForStorage(task: ImageTask): ImageTask {
           sourceImageCount: Number(task.promptMetadata.sourceImageCount) || 0,
         }
       : undefined,
+    referenceImages: Array.isArray(task.referenceImages)
+      ? task.referenceImages
+          .map((reference, index) => ({
+            index: Number(reference.index) || index,
+            url: String(reference.url || ""),
+            kind: reference.kind === "generated" ? ("generated" as const) : ("uploaded" as const),
+            filename: reference.filename ? String(reference.filename) : undefined,
+            sourceJobId: reference.sourceJobId ? String(reference.sourceJobId) : undefined,
+          }))
+          .filter((reference) => reference.url)
+      : undefined,
     model: task.model,
     modelConfig: { ...(task.modelConfig || {}) },
     resultImages: toPlainStringArray(task.resultImages),
