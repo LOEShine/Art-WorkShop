@@ -16,23 +16,12 @@ const props = withDefaults(
 const canvas = ref<HTMLCanvasElement | null>(null);
 let player: DotLottie | null = null;
 
-function syncPlayback() {
-  if (!player) {
-    return;
-  }
-
-  if (props.active) {
-    player.play();
-  } else {
-    player.stop();
-  }
-}
-
-onMounted(() => {
+function createPlayer() {
   if (!canvas.value) {
     return;
   }
 
+  player?.destroy();
   player = new DotLottie({
     canvas: canvas.value,
     src: props.src,
@@ -47,9 +36,24 @@ onMounted(() => {
       devicePixelRatio: window.devicePixelRatio || 1,
     },
   });
-});
+}
+
+function syncPlayback() {
+  if (!player) {
+    return;
+  }
+
+  if (props.active) {
+    player.play();
+  } else {
+    player.stop();
+  }
+}
+
+onMounted(createPlayer);
 
 watch(() => props.active, syncPlayback);
+watch(() => props.src, createPlayer);
 
 onBeforeUnmount(() => {
   player?.destroy();

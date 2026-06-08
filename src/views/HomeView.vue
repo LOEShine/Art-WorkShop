@@ -167,6 +167,7 @@ const VIEW_ROTATION_VERTICAL_MIN = -30;
 const VIEW_ROTATION_VERTICAL_MAX = 60;
 const VIEW_ROTATION_DISTANCE_MIN = 1;
 const VIEW_ROTATION_DISTANCE_MAX = 8;
+const IMAGE_DOWNLOAD_LOTTIE_SRC = "/lottie/image-download.lottie";
 
 const imageInput = ref<HTMLInputElement | null>(null);
 const videoInput = ref<HTMLInputElement | null>(null);
@@ -369,11 +370,20 @@ const viewRotationPrompt = computed(() => {
   return `改变角度，将相机旋转到${promptDescription}`;
 });
 const imageGenerationRequiresSource = computed(() => effectiveImageModelId.value === "qwen-image-edit-multiple-angles");
+const isImageTaskBusy = computed(() =>
+  store.currentTask?.status === "generating" || store.currentTask?.status === "caching",
+);
+const imageActionLabel = computed(() => {
+  if (store.currentTask?.status === "caching") {
+    return "加载图片...";
+  }
+  return store.isGenerating ? "生成中..." : "开始生成";
+});
 const canGenerateImage = computed(
   () =>
     buildEffectiveImagePrompt().length > 0 &&
     !submittingImage.value &&
-    !store.isGenerating &&
+    !isImageTaskBusy.value &&
     (!imageGenerationRequiresSource.value || buildEffectiveSourceImages().length > 0),
 );
 const isVideoGenerating = computed(() => submittingVideo.value || store.videoTask?.phase === "pending");
@@ -917,7 +927,7 @@ watch(
       imageTimer = undefined;
     }
 
-    if (status === "generating" && createdAt) {
+    if ((status === "generating" || status === "caching") && createdAt) {
       currentImageElapsed.value = Date.now() - createdAt;
       imageTimer = window.setInterval(() => {
         currentImageElapsed.value = Date.now() - createdAt;
@@ -987,6 +997,102 @@ watch(
   { immediate: true },
 );
 
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string" && reader.result.startsWith("data:image")) {
+        resolve(reader.result);
+        return;
+      }
+      reject(new Error("下载到的文件不是图片"));
+    };
+    reader.onerror = () => reject(new Error("读取图片文件失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function cacheImageSource(source: string, index: number): Promise<string> {
+  const imageSource = source.trim();
+  if (!imageSource) {
+    throw new Error(`第 ${index + 1} 张图片地址为空`);
+  }
+
+  if (/^data:image\//i.test(imageSource)) {
+    return imageSource;
+  }
+
+  const response = await fetch(imageSource, {
+    method: "GET",
+    headers: {
+      Accept: "image/*,*/*;q=0.8",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`下载第 ${index + 1} 张图片失败 (${response.status})`);
+  }
+
+  const blob = await response.blob();
+  if (!blob.size) {
+    throw new Error(`第 ${index + 1} 张图片为空`);
+  }
+
+  return blobToDataUrl(blob);
+}
+
+async function cacheCompletedImageTask(task: ImageTask): Promise<ImageTask> {
+  const imageSources = task.resultImages.map((source) => String(source || "").trim()).filter(Boolean);
+  if (imageSources.length === 0) {
+    throw new Error("图像生成任务完成，但没有返回图片");
+  }
+
+  const cachingTask: ImageTask = {
+    ...task,
+    status: "caching",
+    progress: "加载图片",
+    progressPercent: 100,
+    updatedAt: Date.now(),
+    error: "",
+  };
+  store.setCurrentTask(cachingTask);
+  store.setIsGenerating(false);
+
+  try {
+    const cachedImages: string[] = [];
+    for (let index = 0; index < imageSources.length; index += 1) {
+      cachedImages.push(await cacheImageSource(imageSources[index], index));
+    }
+
+    const finalTask: ImageTask = {
+      ...task,
+      status: "success",
+      resultImages: cachedImages,
+      progress: "完成",
+      progressPercent: 100,
+      generationTime: task.generationTime || Date.now() - task.createdAt,
+      updatedAt: Date.now(),
+      error: "",
+    };
+
+    await store.addHistoryTask(finalTask, { requirePersistence: true });
+    store.setCurrentTask(finalTask);
+    return finalTask;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const failedTask: ImageTask = {
+      ...task,
+      status: "failed",
+      resultImages: [],
+      generationTime: task.generationTime || Date.now() - task.createdAt,
+      updatedAt: Date.now(),
+      error: `图片已生成，但保存到本地失败：${message}`,
+    };
+    store.setCurrentTask(failedTask);
+    await store.addHistoryTask(failedTask);
+    return failedTask;
+  }
+}
+
 function clearImagePolling() {
   if (imagePollTimer) {
     window.clearTimeout(imagePollTimer);
@@ -1021,11 +1127,18 @@ async function refreshImageTask(force = false) {
   try {
     const job = await pollImageJob(task.serverJobId);
     const updatedTask = imageJobToTask(job, task);
+
+    if (updatedTask.status === "success") {
+      clearImagePolling();
+      await cacheCompletedImageTask(updatedTask);
+      return;
+    }
+
     store.setCurrentTask(updatedTask);
     store.setIsGenerating(updatedTask.status === "generating");
 
-    if (updatedTask.status === "success" || updatedTask.status === "failed") {
-      void store.addHistoryTask(updatedTask);
+    if (updatedTask.status === "failed") {
+      await store.addHistoryTask(updatedTask);
       clearImagePolling();
       return;
     }
@@ -1058,25 +1171,28 @@ async function restoreLatestServerImageJob() {
   }
 
   const currentTask = store.currentTask;
-  if (currentTask && (currentTask.status !== "generating" || currentTask.serverJobId)) {
+  if (!currentTask || currentTask.status !== "generating" || currentTask.serverJobId) {
     return;
   }
 
   try {
     const jobs = await listImageJobs(10);
-    const job = currentTask
-      ? jobs.find((item) => item.clientRequestId === currentTask.clientRequestId)
-        || jobs.find((item) => item.requestFingerprint === currentTask.requestFingerprint)
-      : jobs[0];
+    const job = jobs.find((item) => item.clientRequestId === currentTask.clientRequestId)
+      || jobs.find((item) => item.requestFingerprint === currentTask.requestFingerprint);
     if (!job) {
       return;
     }
 
     const task = imageJobToTask(job, currentTask || undefined);
+    if (task.status === "success") {
+      await cacheCompletedImageTask(task);
+      return;
+    }
+
     store.setCurrentTask(task);
     store.setIsGenerating(task.status === "generating");
-    if (task.status === "success" || task.status === "failed") {
-      void store.addHistoryTask(task);
+    if (task.status === "failed") {
+      await store.addHistoryTask(task);
     }
     if (task.status === "generating") {
       scheduleImagePolling(1000);
@@ -2627,7 +2743,19 @@ async function handleGenerateImage() {
       clientRequestId,
       requestFingerprint,
       onJobUpdate: (job) => {
-        latestTask = imageJobToTask(job, task);
+        const updatedTask = imageJobToTask(job, task);
+        latestTask = updatedTask;
+        if (updatedTask.status === "success") {
+          store.setCurrentTask({
+            ...updatedTask,
+            status: "caching",
+            progress: "加载图片",
+            updatedAt: Date.now(),
+            error: "",
+          });
+          store.setIsGenerating(false);
+          return;
+        }
         store.setCurrentTask(latestTask);
         store.setIsGenerating(latestTask.status === "generating");
       },
@@ -2644,8 +2772,7 @@ async function handleGenerateImage() {
       error: "",
     };
 
-    store.setCurrentTask(finalTask);
-    store.addHistoryTask(finalTask);
+    await cacheCompletedImageTask(finalTask);
   } catch (error) {
     const message = error instanceof Error ? error.message : "未知错误";
     if (latestTask?.serverJobId && /仍在服务器运行/.test(message)) {
@@ -3446,19 +3573,19 @@ onBeforeUnmount(() => {
                 <button
                   type="button"
                   class="primary-action inline-flex h-10 w-full items-center justify-center gap-2 rounded-md px-8 text-sm font-semibold transition-colors disabled:cursor-not-allowed"
-                  :class="store.isGenerating ? 'opacity-80' : ''"
+                  :class="isImageTaskBusy ? 'opacity-80' : ''"
                   :disabled="!canGenerateImage"
                   @click="handleGenerateImage"
                 >
                   <LoaderCircle
-                    v-if="store.isGenerating"
+                    v-if="isImageTaskBusy"
                     class="h-4 w-4 animate-spin"
                   />
                   <Sparkles
                     v-else
                     class="h-4 w-4"
                   />
-                  {{ store.isGenerating ? "生成中..." : "开始生成" }}
+                  {{ imageActionLabel }}
                 </button>
               </div>
             </div>
@@ -3485,6 +3612,21 @@ onBeforeUnmount(() => {
                   class="image-result-frame relative flex items-center justify-center overflow-hidden rounded-md bg-muted"
                 >
                   <LoadingLottie class="image-result-loading-animation" />
+                  <div class="image-result-loading-status">
+                    <p class="image-result-loading-time font-mono text-xs font-bold">
+                      {{ formatElapsed(currentImageElapsed) }}
+                    </p>
+                  </div>
+                </div>
+
+                <div
+                  v-else-if="store.currentTask.status === 'caching'"
+                  class="image-result-frame image-result-cache-frame relative flex items-center justify-center overflow-hidden rounded-md"
+                >
+                  <LoadingLottie
+                    :src="IMAGE_DOWNLOAD_LOTTIE_SRC"
+                    class="image-result-cache-animation"
+                  />
                   <div class="image-result-loading-status">
                     <p class="image-result-loading-time font-mono text-xs font-bold">
                       {{ formatElapsed(currentImageElapsed) }}
@@ -4849,6 +4991,30 @@ onBeforeUnmount(() => {
   height: 150%;
   width: 150%;
   transform: translateX(-50%);
+}
+
+.image-result-cache-frame {
+  background: hsl(var(--preview-background));
+}
+
+.image-result-cache-animation {
+  pointer-events: none;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  height: min(78%, 22rem);
+  width: min(78%, 22rem);
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 10px 24px hsl(var(--foreground) / 0.08));
+}
+
+.dark .image-result-cache-animation {
+  opacity: 0.92;
+  filter:
+    brightness(0.84)
+    saturate(0.92)
+    contrast(1.06)
+    drop-shadow(0 12px 28px hsl(0 0% 0% / 0.22));
 }
 
 .image-result-loading-status {

@@ -49,6 +49,57 @@ export interface ImageJobStatus {
   updatedAt: number;
 }
 
+export interface AdminImageJob extends ImageJobStatus {
+  userId: string;
+  resultImageCount: number;
+}
+
+export interface AdminSummaryUser {
+  userId: string;
+  jobs: number;
+  images: number;
+}
+
+export interface AdminSummaryModel {
+  model: string;
+  jobs: number;
+  images: number;
+}
+
+export interface AdminImageJobSummary {
+  totalJobs: number;
+  totalImages: number;
+  totalUsers: number;
+  succeededJobs: number;
+  failedJobs: number;
+  runningJobs: number;
+  queuedJobs: number;
+  todayJobs: number;
+  users: AdminSummaryUser[];
+  models: AdminSummaryModel[];
+}
+
+export interface AdminImageJobQuery {
+  pin: string;
+  q?: string;
+  status?: string;
+  userId?: string;
+  model?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AdminImageJobResponse {
+  jobs: AdminImageJob[];
+  total: number;
+  offset: number;
+  limit: number;
+  summary: AdminImageJobSummary;
+  filteredSummary: AdminImageJobSummary;
+}
+
 interface SubmitVideoArgs {
   modelKey: VideoModelId;
   config: VideoConfigRecord;
@@ -1217,6 +1268,41 @@ export async function listImageJobs(limit = 20): Promise<ImageJobStatus[]> {
     },
   );
   return response.jobs || [];
+}
+
+export async function verifyAdminPin(pin: string): Promise<void> {
+  await fetchJsonWithNetworkError<{ ok: boolean }>(buildApiUrl(IMAGE_JOB_API_BASE_URL, "/admin/login"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ pin }),
+  });
+}
+
+export async function listAdminImageJobs(query: AdminImageJobQuery): Promise<AdminImageJobResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 80));
+  params.set("offset", String(query.offset ?? 0));
+
+  if (query.q) params.set("q", query.q);
+  if (query.status && query.status !== "all") params.set("status", query.status);
+  if (query.userId) params.set("userId", query.userId);
+  if (query.model) params.set("model", query.model);
+  if (query.from) params.set("from", query.from);
+  if (query.to) params.set("to", query.to);
+
+  return fetchJsonWithNetworkError<AdminImageJobResponse>(
+    buildApiUrl(IMAGE_JOB_API_BASE_URL, `/admin/image-jobs?${params.toString()}`),
+    {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "X-Art-Workshop-Admin-Pin": query.pin,
+      },
+    },
+  );
 }
 
 export async function waitForImageJob(

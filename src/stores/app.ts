@@ -273,11 +273,25 @@ export const useAppStore = defineStore("artWorkshop", {
         });
       }
     },
-    async addHistoryTask(task: ImageTask) {
-      this.history = [task, ...this.history.filter((item) => !isSameImageTaskIdentity(item, task))].slice(
+    async addHistoryTask(task: ImageTask, options: { requirePersistence?: boolean } = {}) {
+      const nextHistory = [task, ...this.history.filter((item) => !isSameImageTaskIdentity(item, task))].slice(
         0,
         HISTORY_LIMIT,
       );
+
+      if (options.requirePersistence) {
+        try {
+          await saveImageHistoryTask(task, HISTORY_LIMIT);
+        } catch (error) {
+          console.error("[history-db] failed to save image history task:", error);
+          throw error;
+        }
+        this.history = nextHistory;
+        this.persist();
+        return;
+      }
+
+      this.history = nextHistory;
       try {
         await saveImageHistoryTask(task, HISTORY_LIMIT);
       } catch (error) {

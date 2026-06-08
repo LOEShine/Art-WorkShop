@@ -16,6 +16,7 @@ const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.ART_WORKSHOP_IMAGE_JO
 const REQUEST_FINGERPRINT_CACHE_TTL_MS = Number(
   process.env.ART_WORKSHOP_IMAGE_JOB_CACHE_TTL_MS || 15 * 60 * 1000,
 );
+const ADMIN_PIN = String(process.env.ART_WORKSHOP_ADMIN_PIN || "1113");
 const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
 const CODEX_IMAGE_REMOTE_BASE_URL = "https://sgdr.funai.vip";
 const WAVESPEED_REMOTE_BASE_URL = "https://api.wavespeed.ai/api/v3";
@@ -750,6 +751,108 @@ function toPublicJob(job) {
   };
 }
 
+function toAdminJob(job) {
+  const publicJob = toPublicJob(job);
+  return {
+    ...publicJob,
+    userId: job.userId,
+    resultImageCount: Array.isArray(job.resultImages) ? job.resultImages.length : 0,
+  };
+}
+
+function getRequestHeader(request, name) {
+  const value = request.headers[name.toLowerCase()];
+  return Array.isArray(value) ? value[0] : String(value || "");
+}
+
+function getAdminPin(request) {
+  const directPin = getRequestHeader(request, "x-art-workshop-admin-pin").trim();
+  if (directPin) {
+    return directPin;
+  }
+
+  const authorization = getRequestHeader(request, "authorization").trim();
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || "";
+}
+
+function assertAdminAccess(request) {
+  if (getAdminPin(request) !== ADMIN_PIN) {
+    throw new HttpError(401, "管理员 PIN 不正确");
+  }
+}
+
+function parseAdminDate(value, endOfDay = false) {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return 0;
+  }
+
+  const timestamp = Number(raw);
+  if (Number.isFinite(timestamp) && timestamp > 0) {
+    return timestamp;
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return 0;
+  }
+  if (endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    parsed.setHours(23, 59, 59, 999);
+  }
+  return parsed.getTime();
+}
+
+function buildAdminSummary(items) {
+  const summary = {
+    totalJobs: items.length,
+    totalImages: 0,
+    totalUsers: 0,
+    succeededJobs: 0,
+    failedJobs: 0,
+    runningJobs: 0,
+    queuedJobs: 0,
+    todayJobs: 0,
+    models: [],
+    users: [],
+  };
+  const users = new Map();
+  const models = new Map();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  for (const job of items) {
+    const imageCount = Array.isArray(job.resultImages) ? job.resultImages.length : 0;
+    summary.totalImages += imageCount;
+    if (job.status === "succeeded") summary.succeededJobs += 1;
+    if (job.status === "failed") summary.failedJobs += 1;
+    if (job.status === "running") summary.runningJobs += 1;
+    if (job.status === "queued") summary.queuedJobs += 1;
+    if (Number(job.createdAt || 0) >= today.getTime()) summary.todayJobs += 1;
+
+    const userId = String(job.userId || "");
+    if (userId) {
+      const current = users.get(userId) || { userId, jobs: 0, images: 0 };
+      current.jobs += 1;
+      current.images += imageCount;
+      users.set(userId, current);
+    }
+
+    const model = String(job.model || "");
+    if (model) {
+      const current = models.get(model) || { model, jobs: 0, images: 0 };
+      current.jobs += 1;
+      current.images += imageCount;
+      models.set(model, current);
+    }
+  }
+
+  summary.totalUsers = users.size;
+  summary.users = Array.from(users.values()).sort((left, right) => right.jobs - left.jobs);
+  summary.models = Array.from(models.values()).sort((left, right) => right.jobs - left.jobs);
+  return summary;
+}
+
 async function loadJobs() {
   await ensureStorage();
   const files = await fs.readdir(JOBS_DIR).catch(() => []);
@@ -984,7 +1087,7 @@ function sendJson(response, statusCode, payload, request) {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Headers": "Content-Type, X-Art-Workshop-User",
+    "Access-Control-Allow-Headers": "Content-Type, X-Art-Workshop-User, X-Art-Workshop-Admin-Pin, Authorization",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   });
   response.end(JSON.stringify(payload));
@@ -1079,6 +1182,81 @@ function listUserJobs(request, response) {
   sendJson(response, 200, { jobs: userJobs }, request);
 }
 
+async function adminLogin(request, response) {
+  const body = await readJsonBody(request);
+  if (String(body.pin || "").trim() !== ADMIN_PIN) {
+    throw new HttpError(401, "管理员 PIN 不正确");
+  }
+
+  sendJson(response, 200, { ok: true }, request);
+}
+
+function listAdminJobs(request, response) {
+  assertAdminAccess(request);
+
+  const requestUrl = new URL(request.url, "http://localhost");
+  const query = String(requestUrl.searchParams.get("q") || "").trim().toLowerCase();
+  const status = String(requestUrl.searchParams.get("status") || "all").trim();
+  const userId = String(requestUrl.searchParams.get("userId") || "").trim();
+  const model = String(requestUrl.searchParams.get("model") || "").trim();
+  const from = parseAdminDate(requestUrl.searchParams.get("from"));
+  const to = parseAdminDate(requestUrl.searchParams.get("to"), true);
+  const limit = Math.min(Math.max(Number(requestUrl.searchParams.get("limit") || 80), 1), 500);
+  const offset = Math.max(Number(requestUrl.searchParams.get("offset") || 0), 0);
+
+  const allJobs = Array.from(jobs.values()).sort((left, right) => {
+    return Number(right.createdAt || 0) - Number(left.createdAt || 0);
+  });
+
+  const filteredJobs = allJobs.filter((job) => {
+    const createdAt = Number(job.createdAt || 0);
+    if (status !== "all" && String(job.status || "") !== status) {
+      return false;
+    }
+    if (userId && String(job.userId || "") !== userId) {
+      return false;
+    }
+    if (model && String(job.model || "") !== model) {
+      return false;
+    }
+    if (from && createdAt < from) {
+      return false;
+    }
+    if (to && createdAt > to) {
+      return false;
+    }
+    if (query) {
+      const haystack = [
+        job.id,
+        job.userId,
+        job.prompt,
+        job.model,
+        job.status,
+        job.error,
+        job.clientRequestId,
+      ]
+        .map((value) => String(value || "").toLowerCase())
+        .join(" ");
+      return haystack.includes(query);
+    }
+    return true;
+  });
+
+  sendJson(
+    response,
+    200,
+    {
+      jobs: filteredJobs.slice(offset, offset + limit).map(toAdminJob),
+      total: filteredJobs.length,
+      offset,
+      limit,
+      summary: buildAdminSummary(allJobs),
+      filteredSummary: buildAdminSummary(filteredJobs),
+    },
+    request,
+  );
+}
+
 function getUserJob(request, response, jobId) {
   const userId = getUserId(request);
   if (!userId) {
@@ -1127,6 +1305,17 @@ async function handleRequest(request, response) {
   if (request.method === "GET" && requestUrl.pathname === "/api/health") {
     sendJson(response, 200, { ok: true, activeJobCount, queuedJobCount: queue.length }, request);
     return;
+  }
+
+  if (parts[0] === "api" && parts[1] === "admin") {
+    if (request.method === "POST" && parts.length === 3 && parts[2] === "login") {
+      await adminLogin(request, response);
+      return;
+    }
+    if (request.method === "GET" && parts.length === 3 && parts[2] === "image-jobs") {
+      listAdminJobs(request, response);
+      return;
+    }
   }
 
   if (parts[0] === "api" && parts[1] === "image-jobs") {

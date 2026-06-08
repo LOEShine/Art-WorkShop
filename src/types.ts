@@ -58,7 +58,7 @@ export interface ImageTask {
   id: string;
   createdAt: number;
   updatedAt?: number;
-  status: "generating" | "success" | "failed";
+  status: "generating" | "caching" | "success" | "failed";
   serverJobId?: string;
   clientRequestId?: string;
   requestFingerprint?: string;

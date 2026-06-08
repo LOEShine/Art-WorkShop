@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from "vue-router";
 
 const HomeView = () => import("@/views/HomeView.vue");
+const AdminView = () => import("@/views/AdminView.vue");
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -13,6 +14,11 @@ export const router = createRouter({
     {
       path: "/prompts",
       redirect: "/",
+    },
+    {
+      path: "/admin",
+      name: "admin",
+      component: AdminView,
     },
   ],
 });
