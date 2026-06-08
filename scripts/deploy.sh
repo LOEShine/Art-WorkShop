@@ -107,6 +107,13 @@ install_codex_proxy() {
   local extension_dir="/www/server/panel/vhost/nginx/extension/$server_name"
   if ! grep -q "BEGIN Art Workshop Codex image proxy" "$config_file" && grep -q "extension/$server_name" "$config_file"; then
     mkdir -p "$extension_dir"
+    cat > "$extension_dir/spa-fallback.conf" <<'NGINX'
+# Art Workshop Vue history-mode routes
+location / {
+    try_files $uri $uri/ /index.html;
+}
+NGINX
+
     cat > "$extension_dir/image-job-api.conf" <<'NGINX'
 # Art Workshop persistent image job API
 location = /api {
@@ -177,6 +184,12 @@ from pathlib import Path
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
 block = """
+    # BEGIN Art Workshop SPA fallback
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+    # END Art Workshop SPA fallback
+
     # BEGIN Art Workshop Codex image proxy
     location = /api {
         return 308 /api/;
@@ -220,6 +233,12 @@ block = """
 
 text = re.sub(
     r"\n\s*# BEGIN Art Workshop Codex image proxy.*?# END Art Workshop Codex image proxy\n?",
+    "\n",
+    text,
+    flags=re.S,
+)
+text = re.sub(
+    r"\n\s*# BEGIN Art Workshop SPA fallback.*?# END Art Workshop SPA fallback\n?",
     "\n",
     text,
     flags=re.S,
