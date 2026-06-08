@@ -9,6 +9,7 @@ import { getAnonymousUserId } from "@/lib/anonymous-user";
 import type {
   ImageConfigRecord,
   ImageModelId,
+  ImagePromptMetadata,
   ImageTask,
   VideoConfigRecord,
   VideoModelId,
@@ -24,6 +25,7 @@ interface GenerateImageArgs {
   apiKey: string;
   clientRequestId?: string;
   requestFingerprint?: string;
+  promptMetadata?: ImagePromptMetadata;
   onJobUpdate?: (job: ImageJobStatus) => void;
 }
 
@@ -40,6 +42,7 @@ export interface ImageJobStatus {
   progressPercent?: number;
   sourceImageCount?: number;
   prompt: string;
+  promptMetadata?: ImagePromptMetadata;
   model: ImageModelId;
   modelConfig: ImageConfigRecord;
   resultImages: string[];
@@ -1217,6 +1220,7 @@ export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): Image
     progressPercent: Number(job.progressPercent) || fallback?.progressPercent || (pending ? 10 : 100),
     sourceImages: fallback?.sourceImages || [],
     prompt: fallback?.prompt || job.prompt,
+    promptMetadata: fallback?.promptMetadata || job.promptMetadata,
     model: fallback?.model || job.model,
     modelConfig: fallback?.modelConfig || job.modelConfig,
     resultImages: pending ? fallback?.resultImages || [] : job.resultImages,
@@ -1228,7 +1232,7 @@ export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): Image
 }
 
 export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobStatus> {
-  const { apiBaseUrl, apiKey, clientRequestId, config, model, prompt, requestFingerprint, sourceImages } = args;
+  const { apiBaseUrl, apiKey, clientRequestId, config, model, prompt, promptMetadata, requestFingerprint, sourceImages } = args;
   if (model !== "qwen-image-edit-multiple-angles") {
     ensureApiKey(apiKey);
   }
@@ -1241,6 +1245,7 @@ export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobS
       requestFingerprint,
       model,
       prompt,
+      promptMetadata,
       sourceImages,
       config,
       apiBaseUrl: resolveServerImageApiBaseUrl(model, apiBaseUrl),

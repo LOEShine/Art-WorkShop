@@ -58,6 +58,15 @@ function prepareImageTaskForStorage(task: ImageTask): ImageTask {
     progressPercent: Number(task.progressPercent) || 0,
     sourceImages: toPlainStringArray(task.sourceImages),
     prompt: String(task.prompt || ""),
+    promptMetadata: task.promptMetadata
+      ? {
+          userPrompt: String(task.promptMetadata.userPrompt || ""),
+          submittedPrompt: String(task.promptMetadata.submittedPrompt || ""),
+          referenceText: String(task.promptMetadata.referenceText || ""),
+          systemPrompts: toPlainStringArray(task.promptMetadata.systemPrompts),
+          sourceImageCount: Number(task.promptMetadata.sourceImageCount) || 0,
+        }
+      : undefined,
     model: task.model,
     modelConfig: { ...(task.modelConfig || {}) },
     resultImages: toPlainStringArray(task.resultImages),

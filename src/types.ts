@@ -54,6 +54,14 @@ export interface PromptItem {
   imageUrl?: string;
 }
 
+export interface ImagePromptMetadata {
+  userPrompt: string;
+  submittedPrompt: string;
+  referenceText: string;
+  systemPrompts: string[];
+  sourceImageCount: number;
+}
+
 export interface ImageTask {
   id: string;
   createdAt: number;
@@ -67,6 +75,7 @@ export interface ImageTask {
   progressPercent?: number;
   sourceImages: string[];
   prompt: string;
+  promptMetadata?: ImagePromptMetadata;
   model: ImageModelId;
   modelConfig: ImageConfigRecord;
   resultImages: string[];

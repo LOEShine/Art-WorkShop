@@ -50,6 +50,27 @@ function sanitizeString(value, maxLength = 20000) {
   return String(value || "").slice(0, maxLength);
 }
 
+function sanitizePromptMetadata(value, fallbackSubmittedPrompt, fallbackSourceImageCount) {
+  const record = value && typeof value === "object" ? value : {};
+  const systemPrompts = Array.isArray(record.systemPrompts)
+    ? record.systemPrompts
+        .map((entry) => sanitizeString(entry, 5000).trim())
+        .filter(Boolean)
+    : [];
+  const referenceText = sanitizeString(record.referenceText || systemPrompts.join("\n"), 12000).trim();
+  const sourceImageCount = Number(record.sourceImageCount);
+
+  return {
+    userPrompt: sanitizeString(record.userPrompt || "", 30000),
+    submittedPrompt: sanitizeString(record.submittedPrompt || fallbackSubmittedPrompt || "", 30000),
+    referenceText,
+    systemPrompts,
+    sourceImageCount: Number.isFinite(sourceImageCount)
+      ? Math.max(0, Math.floor(sourceImageCount))
+      : Number(fallbackSourceImageCount) || 0,
+  };
+}
+
 function stableJson(value) {
   if (Array.isArray(value)) {
     return value.map((item) => stableJson(item));
@@ -741,6 +762,13 @@ function toPublicJob(job) {
     progressPercent: Number(job.progressPercent) || 0,
     sourceImageCount: job.sourceImageCount || 0,
     prompt: job.prompt || "",
+    promptMetadata: job.promptMetadata || {
+      userPrompt: "",
+      submittedPrompt: job.prompt || "",
+      referenceText: "",
+      systemPrompts: [],
+      sourceImageCount: job.sourceImageCount || 0,
+    },
     model: job.model,
     modelConfig: job.modelConfig || {},
     resultImages: job.resultImages || [],
@@ -1109,6 +1137,7 @@ async function createImageJob(request, response) {
 
   const sourceImages = Array.isArray(body.sourceImages) ? body.sourceImages.filter(Boolean).map(String) : [];
   const config = body.config && typeof body.config === "object" ? body.config : {};
+  const promptMetadata = sanitizePromptMetadata(body.promptMetadata, prompt, sourceImages.length);
   const apiBaseUrl = sanitizeString(body.apiBaseUrl || "", 200);
   const requestFingerprint =
     sanitizeId(body.requestFingerprint, "") ||
@@ -1143,6 +1172,7 @@ async function createImageJob(request, response) {
     progressPercent: 5,
     sourceImageCount: sourceImages.length,
     prompt,
+    promptMetadata,
     model,
     modelConfig: config,
     resultImages: [],
@@ -1230,6 +1260,9 @@ function listAdminJobs(request, response) {
         job.id,
         job.userId,
         job.prompt,
+        job.promptMetadata?.userPrompt,
+        job.promptMetadata?.submittedPrompt,
+        job.promptMetadata?.referenceText,
         job.model,
         job.status,
         job.error,

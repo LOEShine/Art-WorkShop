@@ -77,6 +77,7 @@ import type {
   GalleryHistoryItem,
   ImageModelField,
   ImageModelId,
+  ImagePromptMetadata,
   ImageTask,
   SelectOption,
   VideoConfigRecord,
@@ -2082,6 +2083,25 @@ function buildGenerationImagePrompt(model: ImageModelId) {
     .join("\n");
 }
 
+function buildImagePromptMetadata(model: ImageModelId, submittedPrompt: string, sourceImageCount: number): ImagePromptMetadata {
+  const userPrompt = store.prompt.trim();
+  const systemPrompts = [
+    viewRotationPrompt.value,
+    cameraParameterPrompt.value,
+    model === "qwen-image-edit-multiple-angles"
+      ? "保持参考图主体身份、服装、姿态特征和整体画面风格一致"
+      : "",
+  ].filter(Boolean);
+
+  return {
+    userPrompt,
+    submittedPrompt,
+    referenceText: systemPrompts.join("\n"),
+    systemPrompts,
+    sourceImageCount,
+  };
+}
+
 function hasBoundReferenceImage() {
   if (!viewRotationReferenceImage.value) {
     return false;
@@ -2678,6 +2698,7 @@ async function handleGenerateImage() {
   const generationConfig = buildGenerationImageConfig(generationModel);
   const generationPrompt = buildGenerationImagePrompt(generationModel);
   const sourceImages = buildEffectiveSourceImages();
+  const promptMetadata = buildImagePromptMetadata(generationModel, generationPrompt, sourceImages.length);
   const usesCodexImageKey = generationModel === "codex-image-2";
   const apiBaseUrl =
     generationModel === "qwen-image-edit-multiple-angles"
@@ -2725,6 +2746,7 @@ async function handleGenerateImage() {
       progressPercent: 1,
       sourceImages,
       prompt: imagePrompt,
+      promptMetadata,
       model: generationModel,
       modelConfig: { ...generationConfig },
       resultImages: [],
@@ -2738,6 +2760,7 @@ async function handleGenerateImage() {
     const result = await generateImage({
       model: generationModel,
       prompt: generationPrompt,
+      promptMetadata,
       sourceImages,
       config: generationConfig,
       clientRequestId,
@@ -2794,6 +2817,7 @@ async function handleGenerateImage() {
         status: "generating",
         sourceImages,
         prompt: imagePrompt,
+        promptMetadata,
         model: generationModel,
         modelConfig: { ...generationConfig },
         resultImages: [],

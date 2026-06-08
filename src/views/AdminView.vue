@@ -136,6 +136,48 @@ function shortId(value: string) {
   return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : value;
 }
 
+function getUserPrompt(job: AdminImageJob) {
+  return String(job.promptMetadata?.userPrompt || job.prompt || "").trim();
+}
+
+function getReferenceText(job: AdminImageJob) {
+  const metadata = job.promptMetadata;
+  const promptText = String(metadata?.referenceText || "").trim();
+  if (promptText) {
+    return promptText;
+  }
+
+  return Array.isArray(metadata?.systemPrompts)
+    ? metadata.systemPrompts.map((item) => String(item || "").trim()).filter(Boolean).join("\n")
+    : "";
+}
+
+function getSubmittedPrompt(job: AdminImageJob) {
+  return String(job.promptMetadata?.submittedPrompt || job.prompt || "").trim();
+}
+
+function getSourceImageCount(job: AdminImageJob) {
+  const metadataCount = Number(job.promptMetadata?.sourceImageCount);
+  return Number.isFinite(metadataCount) && metadataCount > 0
+    ? metadataCount
+    : Number(job.sourceImageCount) || 0;
+}
+
+function hasSubmittedPromptDetails(job: AdminImageJob) {
+  const submittedPrompt = getSubmittedPrompt(job);
+  return Boolean(submittedPrompt && submittedPrompt !== getUserPrompt(job));
+}
+
+function getPromptDetailText(job: AdminImageJob) {
+  const sections = [
+    ["用户提示词", getUserPrompt(job)],
+    ["参考文字", getReferenceText(job)],
+    ["完整提交提示词", getSubmittedPrompt(job)],
+  ].filter(([, value]) => value);
+
+  return sections.map(([label, value]) => `${label}：\n${value}`).join("\n\n");
+}
+
 async function loadJobs() {
   if (!adminPin.value) {
     return;
@@ -236,7 +278,7 @@ function closePreview() {
 }
 
 async function copyPrompt(job: AdminImageJob) {
-  await navigator.clipboard.writeText(job.prompt || "");
+  await navigator.clipboard.writeText(getPromptDetailText(job));
 }
 
 onMounted(() => {
@@ -442,7 +484,7 @@ onMounted(() => {
           <thead>
             <tr>
               <th>图片</th>
-              <th>关键词</th>
+              <th>提示词 / 参考文字</th>
               <th>用户</th>
               <th>模型</th>
               <th>状态</th>
@@ -479,8 +521,31 @@ onMounted(() => {
                   <ImageIcon class="h-4 w-4" />
                 </div>
               </td>
-              <td>
-                <p class="admin-prompt">{{ job.prompt || "-" }}</p>
+              <td class="admin-prompt-cell">
+                <div class="admin-prompt-block">
+                  <span class="admin-field-label">用户提示词</span>
+                  <p class="admin-prompt">{{ getUserPrompt(job) || "-" }}</p>
+                </div>
+                <div
+                  v-if="getReferenceText(job)"
+                  class="admin-prompt-block admin-prompt-block--reference"
+                >
+                  <span class="admin-field-label">参考文字</span>
+                  <p class="admin-prompt admin-prompt--reference">{{ getReferenceText(job) }}</p>
+                </div>
+                <details
+                  v-if="hasSubmittedPromptDetails(job)"
+                  class="admin-prompt-details"
+                >
+                  <summary>完整提交提示词</summary>
+                  <p class="admin-prompt admin-prompt--full">{{ getSubmittedPrompt(job) }}</p>
+                </details>
+                <p
+                  v-if="getSourceImageCount(job)"
+                  class="admin-reference-count"
+                >
+                  参考图 {{ getSourceImageCount(job) }} 张
+                </p>
                 <p
                   v-if="job.error"
                   class="admin-job-error"
@@ -514,7 +579,7 @@ onMounted(() => {
                 <button
                   class="admin-row-button"
                   type="button"
-                  title="复制关键词"
+                  title="复制提示词详情"
                   @click="copyPrompt(job)"
                 >
                   <Copy class="h-4 w-4" />
@@ -550,7 +615,36 @@ onMounted(() => {
                 />
               </button>
             </div>
-            <p class="admin-prompt">{{ job.prompt || "-" }}</p>
+            <div class="admin-prompt-block">
+              <span class="admin-field-label">用户提示词</span>
+              <p class="admin-prompt">{{ getUserPrompt(job) || "-" }}</p>
+            </div>
+            <div
+              v-if="getReferenceText(job)"
+              class="admin-prompt-block admin-prompt-block--reference"
+            >
+              <span class="admin-field-label">参考文字</span>
+              <p class="admin-prompt admin-prompt--reference">{{ getReferenceText(job) }}</p>
+            </div>
+            <details
+              v-if="hasSubmittedPromptDetails(job)"
+              class="admin-prompt-details"
+            >
+              <summary>完整提交提示词</summary>
+              <p class="admin-prompt admin-prompt--full">{{ getSubmittedPrompt(job) }}</p>
+            </details>
+            <p
+              v-if="getSourceImageCount(job)"
+              class="admin-reference-count"
+            >
+              参考图 {{ getSourceImageCount(job) }} 张
+            </p>
+            <p
+              v-if="job.error"
+              class="admin-job-error"
+            >
+              {{ job.error }}
+            </p>
             <div class="admin-card-meta">
               <span><UserRound class="h-4 w-4" />{{ shortId(job.userId) }}</span>
               <span>{{ job.model }}</span>
@@ -562,7 +656,7 @@ onMounted(() => {
               @click="copyPrompt(job)"
             >
               <Copy class="h-4 w-4" />
-              复制关键词
+              复制提示词
             </button>
           </article>
         </div>
@@ -930,6 +1024,27 @@ onMounted(() => {
   color: hsl(var(--muted-foreground));
 }
 
+.admin-prompt-cell {
+  min-width: 22rem;
+}
+
+.admin-prompt-block {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.admin-prompt-block + .admin-prompt-block,
+.admin-prompt-details,
+.admin-reference-count {
+  margin-top: 0.45rem;
+}
+
+.admin-field-label {
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
 .admin-prompt {
   display: -webkit-box;
   max-width: 34rem;
@@ -938,6 +1053,38 @@ onMounted(() => {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.admin-prompt--reference {
+  color: hsl(var(--muted-foreground));
+  -webkit-line-clamp: 2;
+}
+
+.admin-prompt-details {
+  max-width: 34rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
+}
+
+.admin-prompt-details summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.admin-prompt-details[open] .admin-prompt--full {
+  display: block;
+  max-height: 13rem;
+  overflow: auto;
+  -webkit-line-clamp: unset;
+  margin-top: 0.35rem;
+}
+
+.admin-reference-count {
+  margin-bottom: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.75rem;
 }
 
 .admin-job-error {
