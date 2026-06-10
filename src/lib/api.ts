@@ -147,7 +147,7 @@ export function resolveCodexImageApiKey(apiKey: string): string {
 
 function normalizeCodexImageApiBaseUrl(baseUrl: string): string {
   const trimmed = String(baseUrl || "").trim().replace(/\/+$/, "");
-  if (!trimmed || trimmed === CODEX_IMAGE_API_BASE_URL) {
+  if (!trimmed || trimmed === CODEX_IMAGE_API_BASE_URL || /sgdr\.funai\.vip/i.test(trimmed)) {
     return CODEX_IMAGE_REMOTE_BASE_URL;
   }
 

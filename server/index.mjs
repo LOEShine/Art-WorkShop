@@ -119,7 +119,7 @@ function resolveCodexImageApiKey(apiKey) {
 
 function normalizeCodexImageApiBaseUrl(baseUrl) {
   const trimmed = String(baseUrl || "").trim().replace(/\/+$/, "");
-  if (!trimmed) {
+  if (!trimmed || /sgdr\.funai\.vip/i.test(trimmed)) {
     return CODEX_IMAGE_REMOTE_BASE_URL;
   }
 
@@ -584,7 +584,7 @@ async function generateImages(payload) {
   const apiKey = model === "codex-image-2" ? resolveCodexImageApiKey(payload.apiKey) : String(payload.apiKey || "");
   const apiBaseUrl =
     model === "codex-image-2"
-      ? normalizeCodexImageApiBaseUrl(payload.apiBaseUrl)
+      ? CODEX_IMAGE_REMOTE_BASE_URL
       : String(payload.apiBaseUrl || "") || VECTOR_API_BASE_URL;
 
   if (model !== "qwen-image-edit-multiple-angles" && !apiKey.trim()) {
