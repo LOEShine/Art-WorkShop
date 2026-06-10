@@ -135,18 +135,17 @@ location ^~ /api/ {
 }
 NGINX
 
-    if [[ ! -f "$extension_dir/codex-image-api.conf" ]]; then
-      cat > "$extension_dir/codex-image-api.conf" <<'NGINX'
+    cat > "$extension_dir/codex-image-api.conf" <<'NGINX'
 # Art Workshop Codex image API proxy
 location = /codex-image-api {
     return 308 /codex-image-api/;
 }
 
 location ^~ /codex-image-api/ {
-    proxy_pass https://sgdr.funai.vip/;
+    proxy_pass https://www.tokenbook.cc/;
     proxy_ssl_server_name on;
     proxy_http_version 1.1;
-    proxy_set_header Host sgdr.funai.vip;
+    proxy_set_header Host www.tokenbook.cc;
     proxy_set_header Authorization $http_authorization;
     proxy_set_header Origin "";
     proxy_set_header Referer "";
@@ -158,7 +157,6 @@ location ^~ /codex-image-api/ {
     client_max_body_size 64m;
 }
 NGINX
-    fi
 
     if [[ -x "$nginx_bin" && -f "$nginx_conf" ]]; then
       if "$nginx_bin" -t -c "$nginx_conf" && "$nginx_bin" -s reload -c "$nginx_conf"; then
@@ -214,10 +212,10 @@ block = """
     }
 
     location ^~ /codex-image-api/ {
-        proxy_pass https://sgdr.funai.vip/;
+        proxy_pass https://www.tokenbook.cc/;
         proxy_ssl_server_name on;
         proxy_http_version 1.1;
-        proxy_set_header Host sgdr.funai.vip;
+        proxy_set_header Host www.tokenbook.cc;
         proxy_set_header Authorization $http_authorization;
         proxy_set_header Origin "";
         proxy_set_header Referer "";

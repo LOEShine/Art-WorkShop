@@ -9,11 +9,20 @@ function normalizeCodexProxyHeaders(proxyReq: ClientRequest) {
   proxyReq.setHeader("User-Agent", "ArtWorkshop-Proxy/1.0");
 }
 
+function rewriteCodexImageProxyPath(proxyPath: string) {
+  const stripped = proxyPath.replace(/^\/codex-image-api/, "");
+  if (stripped === "/v1" || stripped.startsWith("/v1/")) {
+    return stripped;
+  }
+
+  return `/v1${stripped.startsWith("/") ? stripped : `/${stripped}`}`;
+}
+
 const codexImageProxy = {
-  target: "https://sgdr.funai.vip",
+  target: "https://www.tokenbook.cc",
   changeOrigin: true,
   secure: true,
-  rewrite: (path: string) => path.replace(/^\/codex-image-api/, ""),
+  rewrite: rewriteCodexImageProxyPath,
   configure: (proxy: { on: (event: "proxyReq", handler: (proxyReq: ClientRequest) => void) => void }) => {
     proxy.on("proxyReq", normalizeCodexProxyHeaders);
   },

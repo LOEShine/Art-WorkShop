@@ -19,8 +19,10 @@ const REQUEST_FINGERPRINT_CACHE_TTL_MS = Number(
 );
 const ADMIN_PIN = String(process.env.ART_WORKSHOP_ADMIN_PIN || "1113");
 const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
-const CODEX_IMAGE_REMOTE_BASE_URL = "https://sgdr.funai.vip";
+const CODEX_IMAGE_REMOTE_BASE_URL = "https://www.tokenbook.cc/v1";
 const WAVESPEED_REMOTE_BASE_URL = "https://api.wavespeed.ai/api/v3";
+const CODEX_IMAGE_LEGACY_API_KEY = "sk-0427d5c8903aabdf3d0df00a85d33fbc6a8bce0811cc231b4dd54622c74f16fa";
+const CODEX_IMAGE_REPLACEMENT_API_KEY = "sk-09b7dd6f5f936a2576fabb314eb821d80be5daba9cebfa5a822ca9bc0bf3cfb7";
 
 const jobs = new Map();
 const runtimePayloads = new Map();
@@ -108,6 +110,25 @@ function buildApiUrl(baseUrl, requestPath) {
   }
 
   return `${String(baseUrl || "").replace(/\/+$/, "")}/${String(requestPath || "").replace(/^\/+/, "")}`;
+}
+
+function resolveCodexImageApiKey(apiKey) {
+  const trimmed = String(apiKey || "").trim();
+  return trimmed === CODEX_IMAGE_LEGACY_API_KEY ? CODEX_IMAGE_REPLACEMENT_API_KEY : trimmed;
+}
+
+function normalizeCodexImageApiBaseUrl(baseUrl) {
+  const trimmed = String(baseUrl || "").trim().replace(/\/+$/, "");
+  if (!trimmed) {
+    return CODEX_IMAGE_REMOTE_BASE_URL;
+  }
+
+  return /\/v1$/i.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
+function normalizeCodexImageSize(value) {
+  const size = String(value || "").trim();
+  return size && size !== "auto" && size !== "default" ? size : "1024x1024";
 }
 
 function normalizeImageCount(value) {
@@ -560,8 +581,11 @@ async function generateImages(payload) {
   const config = payload.config && typeof payload.config === "object" ? payload.config : {};
   const rawSourceImages = Array.isArray(payload.sourceImages) ? payload.sourceImages.filter(Boolean).map(String) : [];
   const sourceImages = await normalizeSourceImages(rawSourceImages);
-  const apiKey = String(payload.apiKey || "");
-  const apiBaseUrl = String(payload.apiBaseUrl || "") || VECTOR_API_BASE_URL;
+  const apiKey = model === "codex-image-2" ? resolveCodexImageApiKey(payload.apiKey) : String(payload.apiKey || "");
+  const apiBaseUrl =
+    model === "codex-image-2"
+      ? normalizeCodexImageApiBaseUrl(payload.apiBaseUrl)
+      : String(payload.apiBaseUrl || "") || VECTOR_API_BASE_URL;
 
   if (model !== "qwen-image-edit-multiple-angles" && !apiKey.trim()) {
     throw new Error("缺少 API Key");
@@ -610,22 +634,17 @@ async function generateImages(payload) {
       body.images = sourceImages;
     }
   } else if (model === "codex-image-2") {
-    const size = String(config.size || "default");
     body = {
       model: "gpt-image-2",
       prompt,
-      quality: "high",
+      size: normalizeCodexImageSize(config.size),
       n: normalizeImageCount(config.n),
-      background: "auto",
-      moderation: "low",
-      ...(size !== "default" ? { size } : {}),
     };
 
     if (sourceImages.length > 0) {
-      endpoint = buildApiUrl(apiBaseUrl || CODEX_IMAGE_REMOTE_BASE_URL, "/v1/images/edits");
-      body.images = sourceImages;
+      endpoint = buildApiUrl(apiBaseUrl || CODEX_IMAGE_REMOTE_BASE_URL, "/images/edits");
     } else {
-      endpoint = buildApiUrl(apiBaseUrl || CODEX_IMAGE_REMOTE_BASE_URL, "/v1/images/generations");
+      endpoint = buildApiUrl(apiBaseUrl || CODEX_IMAGE_REMOTE_BASE_URL, "/images/generations");
     }
   } else if (model === "gpt-image-1.5-official") {
     body = {
@@ -684,15 +703,18 @@ async function generateImages(payload) {
       appendFormField(formData, "model", requestBody.model);
       appendFormField(formData, "prompt", requestBody.prompt);
       appendFormField(formData, "size", requestBody.size);
-      appendFormField(formData, "quality", requestBody.quality);
       appendFormField(formData, "n", requestBody.n || 1);
-      appendFormField(formData, "background", requestBody.background || "auto");
-      appendFormField(formData, "moderation", requestBody.moderation || "auto");
+      if (model !== "codex-image-2") {
+        appendFormField(formData, "quality", requestBody.quality);
+        appendFormField(formData, "background", requestBody.background || "auto");
+        appendFormField(formData, "moderation", requestBody.moderation || "auto");
+      }
 
       sourceImages.forEach((image, index) => {
         const { mimeType, buffer } = dataUrlToBuffer(image);
         const blob = new Blob([buffer], { type: mimeType });
-        formData.append("image[]", blob, `image-${index + 1}.${getDataUrlImageExtension(image)}`);
+        const imageField = model === "codex-image-2" ? "image" : "image[]";
+        formData.append(imageField, blob, `image-${index + 1}.${getDataUrlImageExtension(image)}`);
       });
 
       return fetchJson(endpoint, {

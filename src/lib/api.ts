@@ -125,10 +125,12 @@ const PROMPT_OPTIMIZER_SYSTEM_PROMPT =
 const PROMPT_OPTIMIZER_MODELS = ["gpt-5.5"];
 
 export const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
-export const CODEX_IMAGE_REMOTE_BASE_URL = "https://sgdr.funai.vip";
+export const CODEX_IMAGE_REMOTE_BASE_URL = "https://www.tokenbook.cc/v1";
 export const CODEX_IMAGE_API_BASE_URL = "/codex-image-api";
 export const WAVESPEED_API_BASE_URL = "/wavespeed-api";
 export const IMAGE_JOB_API_BASE_URL = "/api";
+const CODEX_IMAGE_LEGACY_API_KEY = "sk-0427d5c8903aabdf3d0df00a85d33fbc6a8bce0811cc231b4dd54622c74f16fa";
+const CODEX_IMAGE_REPLACEMENT_API_KEY = "sk-09b7dd6f5f936a2576fabb314eb821d80be5daba9cebfa5a822ca9bc0bf3cfb7";
 
 export function buildApiUrl(baseUrl: string, path: string): string {
   if (/^https?:\/\//i.test(path)) {
@@ -136,6 +138,34 @@ export function buildApiUrl(baseUrl: string, path: string): string {
   }
 
   return `${baseUrl.replace(/\/+$/, "")}/${String(path || "").replace(/^\/+/, "")}`;
+}
+
+export function resolveCodexImageApiKey(apiKey: string): string {
+  const trimmed = String(apiKey || "").trim();
+  return trimmed === CODEX_IMAGE_LEGACY_API_KEY ? CODEX_IMAGE_REPLACEMENT_API_KEY : trimmed;
+}
+
+function normalizeCodexImageApiBaseUrl(baseUrl: string): string {
+  const trimmed = String(baseUrl || "").trim().replace(/\/+$/, "");
+  if (!trimmed || trimmed === CODEX_IMAGE_API_BASE_URL) {
+    return CODEX_IMAGE_REMOTE_BASE_URL;
+  }
+
+  return /\/v1$/i.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
+function buildCodexImageApiUrl(apiBaseUrl: string, path: string): string {
+  const endpointPath = `/${String(path || "").replace(/^\/+/, "")}`;
+  if (apiBaseUrl === CODEX_IMAGE_API_BASE_URL) {
+    return buildApiUrl(apiBaseUrl, `/v1${endpointPath}`);
+  }
+
+  return buildApiUrl(normalizeCodexImageApiBaseUrl(apiBaseUrl), endpointPath);
+}
+
+function normalizeCodexImageSize(value: unknown): string {
+  const size = String(value || "").trim();
+  return size && size !== "auto" && size !== "default" ? size : "1024x1024";
 }
 
 function stableJson(value: unknown): unknown {
@@ -987,8 +1017,9 @@ export async function optimizeImagePrompt(
 
 export async function generateImageDirect(args: GenerateImageArgs): Promise<GenerateImageResult> {
   const { apiBaseUrl, apiKey, config, model, prompt, sourceImages } = args;
+  const effectiveApiKey = model === "codex-image-2" ? resolveCodexImageApiKey(apiKey) : apiKey;
   if (model !== "qwen-image-edit-multiple-angles") {
-    ensureApiKey(apiKey);
+    ensureApiKey(effectiveApiKey);
   }
 
   let endpoint = buildApiUrl(apiBaseUrl, "/v1/images/generations");
@@ -1037,21 +1068,17 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
       body.images = sourceImages;
     }
   } else if (model === "codex-image-2") {
-    const size = String(config.size || "default");
     const count = normalizeImageCount(config.n);
     body = {
       model: "gpt-image-2",
       prompt,
-      quality: "high",
+      size: normalizeCodexImageSize(config.size),
       n: count,
-      background: "auto",
-      moderation: "low",
-      ...(size !== "default" ? { size } : {}),
     };
+    endpoint = buildCodexImageApiUrl(apiBaseUrl, "/images/generations");
 
     if (sourceImages.length > 0) {
-      endpoint = buildApiUrl(apiBaseUrl, "/v1/images/edits");
-      body.images = sourceImages;
+      endpoint = buildCodexImageApiUrl(apiBaseUrl, "/images/edits");
     }
   } else if (model === "gpt-image-1.5-official") {
     body = {
@@ -1111,19 +1138,22 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
       appendFormField(formData, "model", requestBody.model);
       appendFormField(formData, "prompt", requestBody.prompt);
       appendFormField(formData, "size", requestBody.size);
-      appendFormField(formData, "quality", requestBody.quality);
       appendFormField(formData, "n", requestBody.n || 1);
-      appendFormField(formData, "background", requestBody.background || "auto");
-      appendFormField(formData, "moderation", requestBody.moderation || "auto");
+      if (model !== "codex-image-2") {
+        appendFormField(formData, "quality", requestBody.quality);
+        appendFormField(formData, "background", requestBody.background || "auto");
+        appendFormField(formData, "moderation", requestBody.moderation || "auto");
+      }
 
       sourceImages.forEach((image, index) => {
-        formData.append("image[]", dataUrlToBlob(image), `image-${index + 1}.${getDataUrlImageExtension(image)}`);
+        const imageField = model === "codex-image-2" ? "image" : "image[]";
+        formData.append(imageField, dataUrlToBlob(image), `image-${index + 1}.${getDataUrlImageExtension(image)}`);
       });
 
       const requestInit: RequestInit = {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${effectiveApiKey}`,
         },
         body: formData,
       };
@@ -1135,7 +1165,7 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(model === "qwen-image-edit-multiple-angles" ? {} : { Authorization: `Bearer ${apiKey}` }),
+        ...(model === "qwen-image-edit-multiple-angles" ? {} : { Authorization: `Bearer ${effectiveApiKey}` }),
       },
       body: JSON.stringify(requestBody),
     };
@@ -1190,7 +1220,7 @@ function getImageJobHeaders(): Record<string, string> {
 
 function resolveServerImageApiBaseUrl(model: ImageModelId, apiBaseUrl: string): string {
   if (model === "codex-image-2" || apiBaseUrl === CODEX_IMAGE_API_BASE_URL) {
-    return CODEX_IMAGE_REMOTE_BASE_URL;
+    return normalizeCodexImageApiBaseUrl(apiBaseUrl);
   }
 
   if (model === "qwen-image-edit-multiple-angles") {
@@ -1236,8 +1266,9 @@ export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): Image
 
 export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobStatus> {
   const { apiBaseUrl, apiKey, clientRequestId, config, model, prompt, promptMetadata, requestFingerprint, sourceImages } = args;
+  const effectiveApiKey = model === "codex-image-2" ? resolveCodexImageApiKey(apiKey) : apiKey;
   if (model !== "qwen-image-edit-multiple-angles") {
-    ensureApiKey(apiKey);
+    ensureApiKey(effectiveApiKey);
   }
 
   return fetchJsonWithNetworkError<ImageJobStatus>(buildApiUrl(IMAGE_JOB_API_BASE_URL, "/image-jobs"), {
@@ -1252,7 +1283,7 @@ export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobS
       sourceImages,
       config,
       apiBaseUrl: resolveServerImageApiBaseUrl(model, apiBaseUrl),
-      apiKey: model === "qwen-image-edit-multiple-angles" ? "" : apiKey,
+      apiKey: model === "qwen-image-edit-multiple-angles" ? "" : effectiveApiKey,
     }),
   });
 }

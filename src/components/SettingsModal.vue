@@ -6,6 +6,7 @@ import {
   buildApiUrl,
   CODEX_IMAGE_API_BASE_URL,
   CODEX_IMAGE_REMOTE_BASE_URL,
+  resolveCodexImageApiKey,
   VECTOR_API_BASE_URL,
 } from "@/lib/api";
 import { useAppStore } from "@/stores/app";
@@ -65,7 +66,7 @@ function handleSave() {
 
 async function testKey(kind: "api" | "codex") {
   const baseUrl = kind === "api" ? VECTOR_API_BASE_URL : CODEX_IMAGE_API_BASE_URL;
-  const key = kind === "api" ? apiKey.value.trim() : codexApiKey.value.trim();
+  const key = kind === "api" ? apiKey.value.trim() : resolveCodexImageApiKey(codexApiKey.value);
 
   testingTarget.value = kind;
   if (kind === "api") {
