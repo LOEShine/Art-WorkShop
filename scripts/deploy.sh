@@ -43,9 +43,6 @@ install_image_job_service() {
 ART_WORKSHOP_API_HOST=127.0.0.1
 ART_WORKSHOP_API_PORT=8787
 ART_WORKSHOP_STORAGE_DIR=/var/lib/art-workshop
-# Optional, used by admin retry when the browser does not send a key.
-ART_WORKSHOP_API_KEY=
-ART_WORKSHOP_CODEX_IMAGE_API_KEY=
 # Optional, required only for the WaveSpeed multi-angle model.
 WAVESPEED_API_KEY=
 ENV

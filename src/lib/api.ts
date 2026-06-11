@@ -150,13 +150,6 @@ export interface AdminImageJobQuery {
   offset?: number;
 }
 
-export interface AdminRetryImageJobArgs {
-  pin: string;
-  jobId: string;
-  apiKey?: string;
-  apiBaseUrl?: string;
-}
-
 export interface AdminImageJobResponse {
   jobs: AdminImageJob[];
   total: number;
@@ -1455,24 +1448,6 @@ export async function listAdminImageJobs(query: AdminImageJobQuery): Promise<Adm
         Accept: "application/json",
         "X-Art-Workshop-Admin-Pin": query.pin,
       },
-    },
-  );
-}
-
-export async function retryAdminImageJob(args: AdminRetryImageJobArgs): Promise<AdminImageJob> {
-  return fetchJsonWithNetworkError<AdminImageJob>(
-    buildApiUrl(IMAGE_JOB_API_BASE_URL, `/admin/image-jobs/${encodeURIComponent(args.jobId)}/retry`),
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "X-Art-Workshop-Admin-Pin": args.pin,
-      },
-      body: JSON.stringify({
-        apiKey: args.apiKey || "",
-        apiBaseUrl: args.apiBaseUrl || "",
-      }),
     },
   );
 }
