@@ -54,8 +54,62 @@ export interface ImageJobStatus {
   updatedAt: number;
 }
 
+export interface ImageJobIpLocation {
+  status?: "pending" | "resolved" | "failed" | "skipped" | "disabled" | "unavailable";
+  provider?: string;
+  reason?: string;
+  error?: string;
+  lookedUpAt?: number;
+  ip?: string;
+  country?: string;
+  countryCode?: string;
+  region?: string;
+  city?: string;
+  postalCode?: string;
+  latitude?: number;
+  longitude?: number;
+  timezone?: string;
+  isp?: string;
+  org?: string;
+  asn?: string;
+  label?: string;
+}
+
+export interface ImageJobSubmissionInfo {
+  receivedAt?: number;
+  ip?: string;
+  ipSource?: string;
+  remoteAddress?: string;
+  forwardedFor?: string;
+  ipLocation?: ImageJobIpLocation;
+  browser?: {
+    name?: string;
+    version?: string;
+  };
+  operatingSystem?: {
+    name?: string;
+    version?: string;
+  };
+  device?: {
+    type?: string;
+    platform?: string;
+    touchPoints?: number;
+    hardwareConcurrency?: number;
+    deviceMemory?: number;
+    screen?: Record<string, unknown>;
+    viewport?: Record<string, unknown>;
+    timezone?: string;
+    language?: string;
+    languages?: string[];
+    cookieEnabled?: boolean;
+  };
+  headers?: Record<string, unknown>;
+  client?: Record<string, unknown>;
+}
+
 export interface AdminImageJob extends ImageJobStatus {
   userId: string;
+  submissionInfo?: ImageJobSubmissionInfo;
   resultImageCount: number;
 }
 
@@ -1218,6 +1272,59 @@ function getImageJobHeaders(): Record<string, string> {
   };
 }
 
+type NavigatorWithUserAgentData = Navigator & {
+  userAgentData?: {
+    brands?: Array<{ brand: string; version: string }>;
+    mobile?: boolean;
+    platform?: string;
+  };
+  deviceMemory?: number;
+};
+
+function collectClientInfo(): Record<string, unknown> {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
+    return {};
+  }
+
+  const nav = navigator as NavigatorWithUserAgentData;
+  const resolvedOptions = Intl.DateTimeFormat().resolvedOptions();
+
+  return {
+    userAgent: navigator.userAgent,
+    userAgentData: nav.userAgentData
+      ? {
+          brands: nav.userAgentData.brands || [],
+          mobile: nav.userAgentData.mobile,
+          platform: nav.userAgentData.platform,
+        }
+      : undefined,
+    platform: navigator.platform,
+    language: navigator.language,
+    languages: Array.from(navigator.languages || []),
+    timezone: resolvedOptions.timeZone,
+    cookieEnabled: navigator.cookieEnabled,
+    hardwareConcurrency: navigator.hardwareConcurrency,
+    deviceMemory: nav.deviceMemory,
+    maxTouchPoints: navigator.maxTouchPoints,
+    screen:
+      typeof screen === "undefined"
+        ? undefined
+        : {
+            width: screen.width,
+            height: screen.height,
+            availWidth: screen.availWidth,
+            availHeight: screen.availHeight,
+            colorDepth: screen.colorDepth,
+            pixelDepth: screen.pixelDepth,
+          },
+    viewport: {
+      width: window.innerWidth,
+      height: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio,
+    },
+  };
+}
+
 function resolveServerImageApiBaseUrl(model: ImageModelId, apiBaseUrl: string): string {
   if (model === "codex-image-2" || apiBaseUrl === CODEX_IMAGE_API_BASE_URL) {
     return normalizeCodexImageApiBaseUrl(apiBaseUrl);
@@ -1280,6 +1387,7 @@ export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobS
       model,
       prompt,
       promptMetadata,
+      clientInfo: collectClientInfo(),
       sourceImages,
       config,
       apiBaseUrl: resolveServerImageApiBaseUrl(model, apiBaseUrl),

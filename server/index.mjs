@@ -2,6 +2,7 @@ import http from "node:http";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -21,6 +22,9 @@ const ADMIN_PIN = String(process.env.ART_WORKSHOP_ADMIN_PIN || "1113");
 const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
 const CODEX_IMAGE_REMOTE_BASE_URL = "https://www.tokenbook.cc/v1";
 const WAVESPEED_REMOTE_BASE_URL = "https://api.wavespeed.ai/api/v3";
+const IP_GEO_API_URL = String(process.env.ART_WORKSHOP_IP_GEO_API_URL || "https://freeipapi.com/api/json/{ip}").trim();
+const IP_GEO_LOOKUP_TIMEOUT_MS = Math.max(500, Number(process.env.ART_WORKSHOP_IP_GEO_TIMEOUT_MS || 8000));
+const TRUST_PROXY_HEADERS = String(process.env.ART_WORKSHOP_TRUST_PROXY_HEADERS || "true").toLowerCase() !== "false";
 const CODEX_IMAGE_LEGACY_API_KEY = "sk-0427d5c8903aabdf3d0df00a85d33fbc6a8bce0811cc231b4dd54622c74f16fa";
 const CODEX_IMAGE_REPLACEMENT_API_KEY = "sk-09b7dd6f5f936a2576fabb314eb821d80be5daba9cebfa5a822ca9bc0bf3cfb7";
 
@@ -51,6 +55,513 @@ function sanitizeId(value, fallback = "") {
 
 function sanitizeString(value, maxLength = 20000) {
   return String(value || "").slice(0, maxLength);
+}
+
+function compactRecord(record) {
+  return Object.fromEntries(
+    Object.entries(record).filter(([, value]) => {
+      if (value === undefined || value === null || value === "") {
+        return false;
+      }
+      if (Array.isArray(value) && value.length === 0) {
+        return false;
+      }
+      if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0) {
+        return false;
+      }
+      return true;
+    }),
+  );
+}
+
+function sanitizeNumber(value, min = -Infinity, max = Infinity) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return undefined;
+  }
+  return Math.min(Math.max(number, min), max);
+}
+
+function sanitizeBoolean(value) {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function sanitizeStringArray(value, maxItems = 12, maxLength = 120) {
+  return Array.isArray(value)
+    ? value
+        .slice(0, maxItems)
+        .map((item) => sanitizeString(item, maxLength).trim())
+        .filter(Boolean)
+    : [];
+}
+
+function sanitizeDimensionRecord(value) {
+  const record = value && typeof value === "object" ? value : {};
+  return compactRecord({
+    width: sanitizeNumber(record.width, 0, 20000),
+    height: sanitizeNumber(record.height, 0, 20000),
+    availWidth: sanitizeNumber(record.availWidth, 0, 20000),
+    availHeight: sanitizeNumber(record.availHeight, 0, 20000),
+    colorDepth: sanitizeNumber(record.colorDepth, 0, 128),
+    pixelDepth: sanitizeNumber(record.pixelDepth, 0, 128),
+    devicePixelRatio: sanitizeNumber(record.devicePixelRatio, 0, 20),
+  });
+}
+
+function sanitizeClientBrands(value) {
+  return Array.isArray(value)
+    ? value
+        .slice(0, 8)
+        .map((item) => {
+          const record = item && typeof item === "object" ? item : {};
+          return compactRecord({
+            brand: sanitizeString(record.brand, 120).trim(),
+            version: sanitizeString(record.version, 40).trim(),
+          });
+        })
+        .filter((item) => item.brand)
+    : [];
+}
+
+function sanitizeClientInfo(value) {
+  const record = value && typeof value === "object" ? value : {};
+  const userAgentData = record.userAgentData && typeof record.userAgentData === "object" ? record.userAgentData : {};
+
+  return compactRecord({
+    userAgent: sanitizeString(record.userAgent, 1200).trim(),
+    platform: sanitizeString(record.platform, 160).trim(),
+    language: sanitizeString(record.language, 80).trim(),
+    languages: sanitizeStringArray(record.languages, 12, 80),
+    timezone: sanitizeString(record.timezone, 160).trim(),
+    cookieEnabled: sanitizeBoolean(record.cookieEnabled),
+    hardwareConcurrency: sanitizeNumber(record.hardwareConcurrency, 0, 512),
+    deviceMemory: sanitizeNumber(record.deviceMemory, 0, 1024),
+    maxTouchPoints: sanitizeNumber(record.maxTouchPoints, 0, 100),
+    screen: sanitizeDimensionRecord(record.screen),
+    viewport: sanitizeDimensionRecord(record.viewport),
+    userAgentData: compactRecord({
+      brands: sanitizeClientBrands(userAgentData.brands),
+      mobile: sanitizeBoolean(userAgentData.mobile),
+      platform: sanitizeString(userAgentData.platform, 160).trim(),
+    }),
+  });
+}
+
+function normalizeIpAddress(value) {
+  let candidate = String(value || "").trim();
+  if (!candidate || /^unknown$/i.test(candidate)) {
+    return "";
+  }
+
+  candidate = candidate.replace(/^"+|"+$/g, "");
+  if (candidate.startsWith("[") && candidate.includes("]")) {
+    candidate = candidate.slice(1, candidate.indexOf("]"));
+  }
+  candidate = candidate.replace(/^::ffff:/i, "");
+  if (/^\d{1,3}(?:\.\d{1,3}){3}:\d+$/.test(candidate)) {
+    candidate = candidate.replace(/:\d+$/, "");
+  }
+
+  const zoneIndex = candidate.indexOf("%");
+  if (zoneIndex > 0) {
+    candidate = candidate.slice(0, zoneIndex);
+  }
+
+  return isIP(candidate) ? candidate : "";
+}
+
+function firstIpFromHeader(value) {
+  for (const part of String(value || "").split(",")) {
+    const ip = normalizeIpAddress(part);
+    if (ip) {
+      return ip;
+    }
+  }
+  return "";
+}
+
+function firstIpFromForwardedHeader(value) {
+  for (const part of String(value || "").split(",")) {
+    const match = part.match(/(?:^|;)\s*for=(?:"?)(\[?[^";,\s]+\]?)(?:"?)/i);
+    const ip = normalizeIpAddress(match?.[1] || "");
+    if (ip) {
+      return ip;
+    }
+  }
+  return "";
+}
+
+function isPrivateOrLocalIp(ip) {
+  const normalized = normalizeIpAddress(ip);
+  if (!normalized) {
+    return true;
+  }
+
+  const version = isIP(normalized);
+  if (version === 4) {
+    const parts = normalized.split(".").map((part) => Number(part));
+    const [first, second] = parts;
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 100 && second >= 64 && second <= 127) ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 192 && second === 0) ||
+      (first === 198 && (second === 18 || second === 19)) ||
+      (first === 198 && second === 51) ||
+      (first === 203 && second === 0) ||
+      first >= 224
+    );
+  }
+
+  const lower = normalized.toLowerCase();
+  return (
+    lower === "::1" ||
+    lower === "::" ||
+    lower.startsWith("fc") ||
+    lower.startsWith("fd") ||
+    lower.startsWith("fe80:") ||
+    lower.startsWith("2001:db8:")
+  );
+}
+
+function getClientIp(request) {
+  const remoteAddress = normalizeIpAddress(request.socket?.remoteAddress || "");
+  if (!TRUST_PROXY_HEADERS) {
+    return compactRecord({ ip: remoteAddress, source: "socket", remoteAddress });
+  }
+
+  const directHeaders = [
+    "cf-connecting-ip",
+    "true-client-ip",
+    "x-real-ip",
+    "x-client-ip",
+  ];
+  for (const headerName of directHeaders) {
+    const ip = firstIpFromHeader(getRequestHeader(request, headerName));
+    if (ip) {
+      return compactRecord({ ip, source: headerName, remoteAddress });
+    }
+  }
+
+  const forwardedFor = getRequestHeader(request, "x-forwarded-for");
+  const forwardedForIp = firstIpFromHeader(forwardedFor);
+  if (forwardedForIp) {
+    return compactRecord({
+      ip: forwardedForIp,
+      source: "x-forwarded-for",
+      forwardedFor: sanitizeString(forwardedFor, 1000).trim(),
+      remoteAddress,
+    });
+  }
+
+  const forwarded = getRequestHeader(request, "forwarded");
+  const forwardedIp = firstIpFromForwardedHeader(forwarded);
+  if (forwardedIp) {
+    return compactRecord({
+      ip: forwardedIp,
+      source: "forwarded",
+      forwardedFor: sanitizeString(forwarded, 1000).trim(),
+      remoteAddress,
+    });
+  }
+
+  return compactRecord({ ip: remoteAddress, source: "socket", remoteAddress });
+}
+
+function parseClientHintBrands(secChUa) {
+  const brands = [];
+  const pattern = /"([^"]+)";\s*v="([^"]+)"/g;
+  let match = pattern.exec(String(secChUa || ""));
+  while (match) {
+    if (!/not.?a.?brand/i.test(match[1])) {
+      brands.push({ brand: match[1], version: match[2] });
+    }
+    match = pattern.exec(String(secChUa || ""));
+  }
+  return brands;
+}
+
+function detectBrowser(userAgent, secChUa) {
+  const ua = String(userAgent || "");
+  const brands = parseClientHintBrands(secChUa);
+  const prioritizedBrand = brands.find((item) => /Microsoft Edge|Google Chrome|Chromium|Opera|Firefox|Safari/i.test(item.brand));
+  let name = prioritizedBrand?.brand || "";
+  let version = prioritizedBrand?.version || "";
+  let match;
+
+  if ((match = ua.match(/EdgA?\/([\d.]+)/i))) {
+    name = "Microsoft Edge";
+    version = match[1];
+  } else if ((match = ua.match(/OPR\/([\d.]+)/i))) {
+    name = "Opera";
+    version = match[1];
+  } else if ((match = ua.match(/CriOS\/([\d.]+)/i))) {
+    name = "Chrome iOS";
+    version = match[1];
+  } else if ((match = ua.match(/Chrome\/([\d.]+)/i))) {
+    name = "Chrome";
+    version = match[1];
+  } else if ((match = ua.match(/FxiOS\/([\d.]+)/i))) {
+    name = "Firefox iOS";
+    version = match[1];
+  } else if ((match = ua.match(/Firefox\/([\d.]+)/i))) {
+    name = "Firefox";
+    version = match[1];
+  } else if ((match = ua.match(/Version\/([\d.]+).*Safari/i))) {
+    name = "Safari";
+    version = match[1];
+  } else if ((match = ua.match(/MSIE\s([\d.]+)|rv:([\d.]+).*Trident/i))) {
+    name = "Internet Explorer";
+    version = match[1] || match[2] || "";
+  }
+
+  return compactRecord({ name: sanitizeString(name, 120), version: sanitizeString(version, 80) });
+}
+
+function detectOperatingSystem(userAgent, platformHint = "") {
+  const ua = String(userAgent || "");
+  const hint = String(platformHint || "");
+  let name = hint;
+  let version = "";
+  let match;
+
+  if ((match = ua.match(/Windows NT ([\d.]+)/i))) {
+    name = "Windows";
+    version = match[1];
+  } else if ((match = ua.match(/Android ([\d.]+)/i))) {
+    name = "Android";
+    version = match[1];
+  } else if ((match = ua.match(/(?:iPhone|iPad|iPod).*OS ([\d_]+)/i))) {
+    name = "iOS";
+    version = match[1].replace(/_/g, ".");
+  } else if ((match = ua.match(/Mac OS X ([\d_]+)/i))) {
+    name = "macOS";
+    version = match[1].replace(/_/g, ".");
+  } else if (/CrOS/i.test(ua)) {
+    name = "Chrome OS";
+  } else if (/Linux/i.test(ua)) {
+    name = "Linux";
+  }
+
+  return compactRecord({ name: sanitizeString(name, 120), version: sanitizeString(version, 80) });
+}
+
+function detectDevice(userAgent, secChUaMobile, clientInfo) {
+  const ua = String(userAgent || "");
+  const mobileHint =
+    secChUaMobile === "?1" ||
+    secChUaMobile === "1" ||
+    (clientInfo.userAgentData && clientInfo.userAgentData.mobile === true);
+  let type = "desktop";
+
+  if (/iPad|Tablet/i.test(ua) || (/Android/i.test(ua) && !/Mobile/i.test(ua))) {
+    type = "tablet";
+  } else if (mobileHint || /Mobi|iPhone|iPod|Android/i.test(ua)) {
+    type = "mobile";
+  }
+
+  return compactRecord({
+    type,
+    platform: clientInfo.platform || clientInfo.userAgentData?.platform,
+    touchPoints: clientInfo.maxTouchPoints,
+    hardwareConcurrency: clientInfo.hardwareConcurrency,
+    deviceMemory: clientInfo.deviceMemory,
+    screen: clientInfo.screen,
+    viewport: clientInfo.viewport,
+    timezone: clientInfo.timezone,
+    language: clientInfo.language,
+    languages: clientInfo.languages,
+    cookieEnabled: clientInfo.cookieEnabled,
+  });
+}
+
+function getIpGeoProvider() {
+  if (!IP_GEO_API_URL || /^(false|off|disabled|none)$/i.test(IP_GEO_API_URL)) {
+    return "";
+  }
+  try {
+    return new URL(IP_GEO_API_URL.replace("{ip}", "8.8.8.8")).hostname;
+  } catch {
+    return "custom";
+  }
+}
+
+function buildInitialIpLocation(ip) {
+  const provider = getIpGeoProvider();
+  if (!ip) {
+    return { status: "unavailable", reason: "missing-ip" };
+  }
+  if (!provider) {
+    return { status: "disabled" };
+  }
+  if (isPrivateOrLocalIp(ip)) {
+    return { status: "skipped", reason: "private-or-local", provider };
+  }
+  return { status: "pending", provider };
+}
+
+function buildSubmissionInfo(request, body) {
+  const clientInfo = sanitizeClientInfo(body.clientInfo);
+  const userAgent = sanitizeString(getRequestHeader(request, "user-agent") || clientInfo.userAgent, 1200).trim();
+  const acceptLanguage = sanitizeString(getRequestHeader(request, "accept-language"), 300).trim();
+  const secChUa = sanitizeString(getRequestHeader(request, "sec-ch-ua"), 500).trim();
+  const secChUaMobile = sanitizeString(getRequestHeader(request, "sec-ch-ua-mobile"), 40).trim();
+  const secChUaPlatform = sanitizeString(getRequestHeader(request, "sec-ch-ua-platform"), 160).replace(/^"+|"+$/g, "").trim();
+  const ipInfo = getClientIp(request);
+
+  return compactRecord({
+    receivedAt: now(),
+    ip: ipInfo.ip,
+    ipSource: ipInfo.source,
+    remoteAddress: ipInfo.remoteAddress,
+    forwardedFor: ipInfo.forwardedFor,
+    ipLocation: buildInitialIpLocation(ipInfo.ip),
+    browser: detectBrowser(userAgent, secChUa),
+    operatingSystem: detectOperatingSystem(userAgent, secChUaPlatform || clientInfo.userAgentData?.platform || clientInfo.platform),
+    device: detectDevice(userAgent, secChUaMobile, clientInfo),
+    headers: compactRecord({
+      userAgent,
+      acceptLanguage,
+      secChUa,
+      secChUaMobile,
+      secChUaPlatform,
+    }),
+    client: clientInfo,
+  });
+}
+
+function buildIpLocationUrl(ip) {
+  if (IP_GEO_API_URL.includes("{ip}")) {
+    return IP_GEO_API_URL.replaceAll("{ip}", encodeURIComponent(ip));
+  }
+  const separator = IP_GEO_API_URL.includes("?") ? "&" : "/";
+  return `${IP_GEO_API_URL.replace(/\/+$/, "")}${separator}${encodeURIComponent(ip)}`;
+}
+
+function normalizeIpLocationPayload(payload) {
+  const root =
+    payload && typeof payload === "object" && payload.data && typeof payload.data === "object"
+      ? payload.data
+      : payload && typeof payload === "object"
+        ? payload
+        : {};
+
+  if (root.success === false || root.error === true || String(root.status || "").toLowerCase() === "fail") {
+    throw new Error(root.message || root.error || "IP 定位接口返回失败");
+  }
+
+  let latitude = sanitizeNumber(root.latitude ?? root.lat, -90, 90);
+  let longitude = sanitizeNumber(root.longitude ?? root.lon ?? root.lng, -180, 180);
+  if ((latitude === undefined || longitude === undefined) && typeof root.loc === "string") {
+    const [lat, lon] = root.loc.split(",");
+    latitude = sanitizeNumber(lat, -90, 90);
+    longitude = sanitizeNumber(lon, -180, 180);
+  }
+
+  const timezone =
+    root.timezone && typeof root.timezone === "object"
+      ? root.timezone.id
+      : Array.isArray(root.timeZones)
+        ? root.timeZones[0]
+        : root.timezone;
+  const connection = root.connection && typeof root.connection === "object" ? root.connection : {};
+  const country = sanitizeString(root.country || root.country_name || root.countryName || "", 120).trim();
+  const region = sanitizeString(root.region || root.regionName || root.region_name || "", 120).trim();
+  const city = sanitizeString(root.city || root.cityName || "", 120).trim();
+  const label = [country, region, city].filter(Boolean).join(" / ");
+
+  return compactRecord({
+    ip: sanitizeString(root.ip || root.query || root.ipAddress || "", 80).trim(),
+    country,
+    countryCode: sanitizeString(root.country_code || root.countryCode || "", 20).trim(),
+    region,
+    city,
+    postalCode: sanitizeString(root.postal || root.zip || root.zipCode || "", 40).trim(),
+    latitude,
+    longitude,
+    timezone: sanitizeString(timezone || "", 120).trim(),
+    isp: sanitizeString(root.isp || connection.isp || "", 200).trim(),
+    org: sanitizeString(root.org || connection.org || root.asnOrganization || "", 200).trim(),
+    asn: sanitizeString(root.asn || connection.asn || root.as || "", 80).trim(),
+    label,
+  });
+}
+
+async function lookupIpLocation(ip) {
+  const provider = getIpGeoProvider();
+  if (!ip || !provider || isPrivateOrLocalIp(ip)) {
+    return buildInitialIpLocation(ip);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), IP_GEO_LOOKUP_TIMEOUT_MS);
+  try {
+    const response = await fetch(buildIpLocationUrl(ip), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "ArtWorkshop-IPLookup/1.0",
+      },
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { raw: text };
+    }
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload) || `HTTP ${response.status}`);
+    }
+    return compactRecord({
+      status: "resolved",
+      provider,
+      lookedUpAt: now(),
+      ...normalizeIpLocationPayload(payload),
+    });
+  } catch (error) {
+    return compactRecord({
+      status: "failed",
+      provider,
+      lookedUpAt: now(),
+      error: sanitizeString(error instanceof Error ? error.message : String(error), 300),
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function needsIpLocationLookup(job) {
+  return job?.submissionInfo?.ipLocation?.status === "pending" && job.submissionInfo.ip;
+}
+
+function scheduleIpLocationLookup(jobId) {
+  setTimeout(() => {
+    hydrateIpLocation(jobId).catch((error) => {
+      console.warn("[art-workshop-api] IP location lookup failed", jobId, error);
+    });
+  }, 0);
+}
+
+async function hydrateIpLocation(jobId) {
+  const job = jobs.get(jobId);
+  if (!needsIpLocationLookup(job)) {
+    return;
+  }
+
+  const ipLocation = await lookupIpLocation(job.submissionInfo.ip);
+  const current = jobs.get(jobId);
+  if (!current?.submissionInfo) {
+    return;
+  }
+
+  current.submissionInfo.ipLocation = ipLocation;
+  await saveJob(current);
 }
 
 function sanitizePromptMetadata(value, fallbackSubmittedPrompt, fallbackSourceImageCount) {
@@ -813,6 +1324,7 @@ function toAdminJob(job) {
   return {
     ...publicJob,
     userId: job.userId,
+    submissionInfo: job.submissionInfo || undefined,
     resultImageCount: Array.isArray(job.resultImages) ? job.resultImages.length : 0,
   };
 }
@@ -934,6 +1446,9 @@ async function loadJobs() {
       }
 
       jobs.set(job.id, job);
+      if (needsIpLocationLookup(job)) {
+        scheduleIpLocationLookup(job.id);
+      }
     } catch (error) {
       console.warn("[art-workshop-api] skip invalid job file", file, error);
     }
@@ -1207,6 +1722,7 @@ async function createImageJob(request, response) {
   const sourceImages = Array.isArray(body.sourceImages) ? body.sourceImages.filter(Boolean).map(String) : [];
   const config = body.config && typeof body.config === "object" ? body.config : {};
   const promptMetadata = sanitizePromptMetadata(body.promptMetadata, prompt, sourceImages.length);
+  const submissionInfo = buildSubmissionInfo(request, body);
   const apiBaseUrl = sanitizeString(body.apiBaseUrl || "", 200);
   const requestFingerprint =
     sanitizeId(body.requestFingerprint, "") ||
@@ -1242,6 +1758,7 @@ async function createImageJob(request, response) {
     sourceImageCount: sourceImages.length,
     prompt,
     promptMetadata,
+    submissionInfo,
     model,
     modelConfig: config,
     resultImages: [],
@@ -1262,6 +1779,9 @@ async function createImageJob(request, response) {
     apiKey: sanitizeString(body.apiKey || "", 2000),
   });
   await saveJob(job);
+  if (needsIpLocationLookup(job)) {
+    scheduleIpLocationLookup(job.id);
+  }
   enqueueJob(job.id);
   sendJson(response, 202, toPublicJob(job), request);
 }
@@ -1338,6 +1858,7 @@ function listAdminJobs(request, response) {
         job.status,
         job.error,
         job.clientRequestId,
+        JSON.stringify(job.submissionInfo || {}),
       ]
         .map((value) => String(value || "").toLowerCase())
         .join(" ");

@@ -136,6 +136,123 @@ function shortId(value: string) {
   return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : value;
 }
 
+function formatVersion(version: string | undefined) {
+  const normalized = String(version || "").trim();
+  return normalized ? normalized.split(".")[0] : "";
+}
+
+function formatNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(Math.round(number)) : "";
+}
+
+function getBrowserLabel(job: AdminImageJob) {
+  const browser = job.submissionInfo?.browser;
+  const name = String(browser?.name || "").trim();
+  const version = formatVersion(browser?.version);
+  return [name, version].filter(Boolean).join(" ") || "-";
+}
+
+function getOperatingSystemLabel(job: AdminImageJob) {
+  const os = job.submissionInfo?.operatingSystem;
+  return [os?.name, formatVersion(os?.version)].filter(Boolean).join(" ");
+}
+
+function getDeviceTypeLabel(type: string | undefined) {
+  if (type === "mobile") return "手机";
+  if (type === "tablet") return "平板";
+  if (type === "desktop") return "桌面";
+  return type || "";
+}
+
+function getViewportLabel(job: AdminImageJob) {
+  const viewport = job.submissionInfo?.device?.viewport;
+  const width = formatNumber(viewport?.width);
+  const height = formatNumber(viewport?.height);
+  return width && height ? `${width}x${height}` : "";
+}
+
+function getDeviceLabel(job: AdminImageJob) {
+  const device = job.submissionInfo?.device;
+  const pieces = [
+    getDeviceTypeLabel(device?.type),
+    getOperatingSystemLabel(job),
+    getViewportLabel(job),
+  ].filter(Boolean);
+  return pieces.join(" · ") || "-";
+}
+
+function getIpLabel(job: AdminImageJob) {
+  return String(job.submissionInfo?.ip || "").trim() || "暂无记录";
+}
+
+function getLocationLabel(job: AdminImageJob) {
+  const location = job.submissionInfo?.ipLocation;
+  if (!location) {
+    return "暂无记录";
+  }
+
+  const label =
+    String(location.label || "").trim() ||
+    [location.country, location.region, location.city].map((item) => String(item || "").trim()).filter(Boolean).join(" / ");
+  if (label) {
+    return label;
+  }
+
+  if (location.status === "pending") return "定位中";
+  if (location.status === "failed") return location.error ? `定位失败：${location.error}` : "定位失败";
+  if (location.status === "skipped") return location.reason === "private-or-local" ? "本地/内网 IP" : "已跳过定位";
+  if (location.status === "disabled") return "未启用定位";
+  if (location.status === "unavailable") return "未获取到 IP";
+  return "暂无记录";
+}
+
+function getLocationTitle(job: AdminImageJob) {
+  const location = job.submissionInfo?.ipLocation;
+  if (!location) {
+    return "";
+  }
+  const coordinates =
+    Number.isFinite(Number(location.latitude)) && Number.isFinite(Number(location.longitude))
+      ? `${location.latitude}, ${location.longitude}`
+      : "";
+  return [
+    getLocationLabel(job),
+    location.provider ? `API: ${location.provider}` : "",
+    location.isp ? `ISP: ${location.isp}` : "",
+    location.org ? `ORG: ${location.org}` : "",
+    location.asn ? `ASN: ${location.asn}` : "",
+    coordinates ? `坐标: ${coordinates}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function getAdminUserMetaRows(job: AdminImageJob) {
+  return [
+    {
+      key: "ip",
+      label: "IP",
+      value: getIpLabel(job),
+      title: job.submissionInfo?.forwardedFor || job.submissionInfo?.ip || "",
+    },
+    {
+      key: "location",
+      label: "位置",
+      value: getLocationLabel(job),
+      title: getLocationTitle(job),
+    },
+    {
+      key: "browser",
+      label: "浏览器",
+      value: getBrowserLabel(job) === "-" ? "暂无记录" : getBrowserLabel(job),
+    },
+    {
+      key: "device",
+      label: "设备",
+      value: getDeviceLabel(job) === "-" ? "暂无记录" : getDeviceLabel(job),
+    },
+  ];
+}
+
 function getUserPrompt(job: AdminImageJob) {
   return String(job.promptMetadata?.userPrompt || job.prompt || "").trim();
 }
@@ -414,7 +531,7 @@ onMounted(() => {
           <input
             v-model="query"
             type="search"
-            placeholder="搜索关键词、用户、模型、任务 ID"
+            placeholder="搜索关键词、用户、模型、IP、地区、浏览器"
             @keydown.enter.prevent="applyFilters"
           />
         </div>
@@ -585,9 +702,22 @@ onMounted(() => {
                 </p>
               </td>
               <td>
-                <div class="admin-user">
-                  <UserRound class="h-4 w-4" />
-                  <span :title="job.userId">{{ shortId(job.userId) }}</span>
+                <div class="admin-user-stack">
+                  <div class="admin-user">
+                    <UserRound class="h-4 w-4" />
+                    <span :title="job.userId">{{ shortId(job.userId) }}</span>
+                  </div>
+                  <div class="admin-user-meta">
+                    <div
+                      v-for="row in getAdminUserMetaRows(job)"
+                      :key="`${job.id}-${row.key}`"
+                      class="admin-user-meta-row"
+                      :title="row.title || row.value"
+                    >
+                      <span class="admin-user-meta-label">{{ row.label }}</span>
+                      <span class="admin-user-meta-value">{{ row.value }}</span>
+                    </div>
+                  </div>
                 </div>
               </td>
               <td>{{ job.model }}</td>
@@ -696,6 +826,17 @@ onMounted(() => {
             >
               {{ job.error }}
             </p>
+            <div class="admin-card-user-meta">
+              <div
+                v-for="row in getAdminUserMetaRows(job)"
+                :key="`${job.id}-mobile-${row.key}`"
+                class="admin-user-meta-row"
+                :title="row.title || row.value"
+              >
+                <span class="admin-user-meta-label">{{ row.label }}</span>
+                <span class="admin-user-meta-value">{{ row.value }}</span>
+              </div>
+            </div>
             <div class="admin-card-meta">
               <span><UserRound class="h-4 w-4" />{{ shortId(job.userId) }}</span>
               <span>{{ job.model }}</span>
@@ -1168,6 +1309,47 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
+}
+
+.admin-user-stack {
+  display: grid;
+  min-width: 13rem;
+  max-width: 18rem;
+  gap: 0.45rem;
+}
+
+.admin-user-meta,
+.admin-card-user-meta {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.admin-card-user-meta {
+  margin-top: 0.55rem;
+}
+
+.admin-user-meta-row {
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.35rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.admin-user-meta-label {
+  color: hsl(var(--muted-foreground));
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.admin-user-meta-value {
+  min-width: 0;
+  overflow: hidden;
+  color: hsl(var(--foreground));
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .admin-status {

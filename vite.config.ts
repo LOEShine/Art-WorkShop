@@ -60,6 +60,7 @@ export default defineConfig(({ mode }) => {
         "/api": {
           target: imageJobApiUrl,
           changeOrigin: true,
+          xfwd: true,
         },
         "/codex-image-api": codexImageProxy,
         "/wavespeed-api": wavespeedProxy,
@@ -70,6 +71,7 @@ export default defineConfig(({ mode }) => {
         "/api": {
           target: imageJobApiUrl,
           changeOrigin: true,
+          xfwd: true,
         },
         "/codex-image-api": codexImageProxy,
         "/wavespeed-api": wavespeedProxy,
