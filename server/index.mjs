@@ -25,6 +25,8 @@ const WAVESPEED_REMOTE_BASE_URL = "https://api.wavespeed.ai/api/v3";
 const IP_GEO_API_URL = String(process.env.ART_WORKSHOP_IP_GEO_API_URL || "https://freeipapi.com/api/json/{ip}").trim();
 const IP_GEO_LOOKUP_TIMEOUT_MS = Math.max(500, Number(process.env.ART_WORKSHOP_IP_GEO_TIMEOUT_MS || 8000));
 const TRUST_PROXY_HEADERS = String(process.env.ART_WORKSHOP_TRUST_PROXY_HEADERS || "true").toLowerCase() !== "false";
+const DEFAULT_VECTOR_API_KEY = String(process.env.ART_WORKSHOP_API_KEY || process.env.VECTOR_API_KEY || "").trim();
+const DEFAULT_CODEX_IMAGE_API_KEY = String(process.env.ART_WORKSHOP_CODEX_IMAGE_API_KEY || "").trim();
 const CODEX_IMAGE_LEGACY_API_KEY = "sk-0427d5c8903aabdf3d0df00a85d33fbc6a8bce0811cc231b4dd54622c74f16fa";
 const CODEX_IMAGE_REPLACEMENT_API_KEY = "sk-09b7dd6f5f936a2576fabb314eb821d80be5daba9cebfa5a822ca9bc0bf3cfb7";
 
@@ -1568,6 +1570,96 @@ async function persistReferenceImages(job, sourceImages) {
   return references;
 }
 
+async function referenceImageToRetrySource(job, reference) {
+  if (!reference || typeof reference !== "object") {
+    return "";
+  }
+
+  if (reference.kind === "generated" && reference.url) {
+    return String(reference.url);
+  }
+
+  if (reference.kind === "uploaded" && reference.filename) {
+    const referenceDir = path.resolve(REFERENCES_DIR, sanitizeId(job.userId), sanitizeId(job.id));
+    const filename = path.basename(String(reference.filename));
+    const imagePath = path.resolve(referenceDir, filename);
+    if (!imagePath.startsWith(`${referenceDir}${path.sep}`)) {
+      throw new Error("参考图路径无效，无法重试");
+    }
+    const buffer = await fs.readFile(imagePath);
+    return bufferToDataUrl({
+      mimeType: imageMimeTypeFromFilename(filename),
+      buffer,
+    });
+  }
+
+  return "";
+}
+
+async function buildRetrySourceImages(job) {
+  const references = Array.isArray(job.referenceImages) ? [...job.referenceImages] : [];
+  if (references.length === 0) {
+    if (Number(job.sourceImageCount || job.promptMetadata?.sourceImageCount || 0) > 0) {
+      throw new Error("旧任务缺少已保存的参考图，无法从后台重试");
+    }
+    return [];
+  }
+
+  references.sort((left, right) => Number(left.index || 0) - Number(right.index || 0));
+  const sources = [];
+  for (const reference of references) {
+    const source = await referenceImageToRetrySource(job, reference);
+    if (source) {
+      sources.push(source);
+    }
+  }
+  return sources;
+}
+
+function getDefaultRetryApiKey(model) {
+  if (model === "qwen-image-edit-multiple-angles") {
+    return "";
+  }
+  if (model === "codex-image-2") {
+    return DEFAULT_CODEX_IMAGE_API_KEY;
+  }
+  return DEFAULT_VECTOR_API_KEY;
+}
+
+function getRetryApiKey(job, body) {
+  const provided = sanitizeString(body.apiKey || "", 2000).trim();
+  if (provided) {
+    return provided;
+  }
+
+  const runtimePayload = runtimePayloads.get(job.id);
+  if (runtimePayload?.apiKey) {
+    return sanitizeString(runtimePayload.apiKey, 2000).trim();
+  }
+
+  return getDefaultRetryApiKey(job.model);
+}
+
+function getRetryApiBaseUrl(job, body) {
+  const provided = sanitizeString(body.apiBaseUrl || "", 200).trim();
+  if (provided) {
+    return provided;
+  }
+
+  const runtimePayload = runtimePayloads.get(job.id);
+  if (runtimePayload?.apiBaseUrl) {
+    return sanitizeString(runtimePayload.apiBaseUrl, 200).trim();
+  }
+
+  if (job.model === "codex-image-2") {
+    return CODEX_IMAGE_REMOTE_BASE_URL;
+  }
+  if (job.model === "qwen-image-edit-multiple-angles") {
+    return "";
+  }
+  return VECTOR_API_BASE_URL;
+}
+
 async function persistGeneratedImage(job, source, index) {
   const resultDir = path.join(RESULTS_DIR, sanitizeId(job.userId), sanitizeId(job.id));
   await fs.mkdir(resultDir, { recursive: true });
@@ -1811,6 +1903,51 @@ async function adminLogin(request, response) {
   sendJson(response, 200, { ok: true }, request);
 }
 
+async function retryAdminImageJob(request, response, jobId) {
+  assertAdminAccess(request);
+
+  const job = jobs.get(jobId);
+  if (!job) {
+    throw new HttpError(404, "任务不存在");
+  }
+  if (job.status === "queued" || job.status === "running") {
+    throw new HttpError(409, "任务已经在生成中");
+  }
+  if (job.status !== "failed") {
+    throw new HttpError(400, "只有失败任务可以重试");
+  }
+
+  const body = await readJsonBody(request);
+  const sourceImages = await buildRetrySourceImages(job);
+  const apiKey = getRetryApiKey(job, body);
+  if (job.model !== "qwen-image-edit-multiple-angles" && !String(apiKey || "").trim()) {
+    throw new HttpError(400, job.model === "codex-image-2" ? "重试需要 CODEX KEY" : "重试需要 API KEY");
+  }
+
+  const retriedAt = now();
+  runtimePayloads.set(job.id, {
+    model: job.model,
+    prompt: sanitizeString(job.prompt, 30000),
+    sourceImages,
+    config: job.modelConfig && typeof job.modelConfig === "object" ? job.modelConfig : {},
+    apiBaseUrl: getRetryApiBaseUrl(job, body),
+    apiKey,
+  });
+
+  job.status = "queued";
+  job.progress = "等待重试";
+  job.progressPercent = 5;
+  job.resultImages = [];
+  job.error = "";
+  job.generationTime = 0;
+  job.retryCount = Math.max(0, Number(job.retryCount || 0)) + 1;
+  job.retriedAt = retriedAt;
+  await saveJob(job);
+
+  enqueueJob(job.id);
+  sendJson(response, 202, toAdminJob(job), request);
+}
+
 function listAdminJobs(request, response) {
   assertAdminAccess(request);
 
@@ -1969,6 +2106,10 @@ async function handleRequest(request, response) {
     }
     if (request.method === "GET" && parts.length === 3 && parts[2] === "image-jobs") {
       listAdminJobs(request, response);
+      return;
+    }
+    if (request.method === "POST" && parts.length === 5 && parts[2] === "image-jobs" && parts[4] === "retry") {
+      await retryAdminImageJob(request, response, parts[3]);
       return;
     }
   }

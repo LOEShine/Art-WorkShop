@@ -19,12 +19,16 @@ import {
 } from "lucide-vue-next";
 
 import {
+  CODEX_IMAGE_API_BASE_URL,
   listAdminImageJobs,
+  retryAdminImageJob,
+  VECTOR_API_BASE_URL,
   verifyAdminPin,
   type AdminImageJob,
   type AdminImageJobResponse,
   type AdminImageJobSummary,
 } from "@/lib/api";
+import { readPersistedSettings } from "@/lib/settings-storage";
 
 const ADMIN_SESSION_KEY = "art-workshop-admin-pin";
 const PAGE_SIZE = 60;
@@ -44,6 +48,7 @@ const toDate = ref("");
 const offset = ref(0);
 const previewImage = ref("");
 const previewTitle = ref("");
+const retryingJobId = ref("");
 
 const statusOptions = [
   { value: "all", label: "全部状态" },
@@ -410,6 +415,56 @@ async function copyPrompt(job: AdminImageJob) {
   await navigator.clipboard.writeText(getPromptDetailText(job));
 }
 
+function canRetryJob(job: AdminImageJob) {
+  return job.status === "failed";
+}
+
+function getRetrySettings(job: AdminImageJob) {
+  const settings = readPersistedSettings();
+  if (job.model === "qwen-image-edit-multiple-angles") {
+    return { apiKey: "", apiBaseUrl: "" };
+  }
+  if (job.model === "codex-image-2") {
+    return {
+      apiKey: String(settings.codexApiKey || "").trim(),
+      apiBaseUrl: CODEX_IMAGE_API_BASE_URL,
+    };
+  }
+  return {
+    apiKey: String(settings.apiKey || "").trim(),
+    apiBaseUrl: VECTOR_API_BASE_URL,
+  };
+}
+
+async function retryJob(job: AdminImageJob) {
+  if (!canRetryJob(job) || retryingJobId.value) {
+    return;
+  }
+
+  const retrySettings = getRetrySettings(job);
+  if (job.model !== "qwen-image-edit-multiple-angles" && !retrySettings.apiKey) {
+    error.value = job.model === "codex-image-2"
+      ? "当前浏览器没有保存 CODEX KEY，无法从后台重试"
+      : "当前浏览器没有保存 API KEY，无法从后台重试";
+    return;
+  }
+
+  retryingJobId.value = job.id;
+  error.value = "";
+  try {
+    await retryAdminImageJob({
+      pin: adminPin.value,
+      jobId: job.id,
+      ...retrySettings,
+    });
+    await loadJobs();
+  } catch (retryError) {
+    error.value = retryError instanceof Error ? retryError.message : String(retryError);
+  } finally {
+    retryingJobId.value = "";
+  }
+}
+
 onMounted(() => {
   const savedPin = sessionStorage.getItem(ADMIN_SESSION_KEY) || "";
   if (savedPin) {
@@ -737,14 +792,33 @@ onMounted(() => {
                 </div>
               </td>
               <td>
-                <button
-                  class="admin-row-button"
-                  type="button"
-                  title="复制提示词详情"
-                  @click="copyPrompt(job)"
-                >
-                  <Copy class="h-4 w-4" />
-                </button>
+                <div class="admin-row-actions">
+                  <button
+                    v-if="canRetryJob(job)"
+                    class="admin-row-button"
+                    type="button"
+                    title="重试失败任务"
+                    :disabled="Boolean(retryingJobId)"
+                    @click="retryJob(job)"
+                  >
+                    <LoaderCircle
+                      v-if="retryingJobId === job.id"
+                      class="h-4 w-4 animate-spin"
+                    />
+                    <RefreshCw
+                      v-else
+                      class="h-4 w-4"
+                    />
+                  </button>
+                  <button
+                    class="admin-row-button"
+                    type="button"
+                    title="复制提示词详情"
+                    @click="copyPrompt(job)"
+                  >
+                    <Copy class="h-4 w-4" />
+                  </button>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -842,14 +916,33 @@ onMounted(() => {
               <span>{{ job.model }}</span>
               <span><Clock class="h-4 w-4" />{{ formatDuration(job.generationTime) }}</span>
             </div>
-            <button
-              class="admin-card-copy"
-              type="button"
-              @click="copyPrompt(job)"
-            >
-              <Copy class="h-4 w-4" />
-              复制提示词
-            </button>
+            <div class="admin-card-actions">
+              <button
+                v-if="canRetryJob(job)"
+                class="admin-card-copy"
+                type="button"
+                :disabled="Boolean(retryingJobId)"
+                @click="retryJob(job)"
+              >
+                <LoaderCircle
+                  v-if="retryingJobId === job.id"
+                  class="h-4 w-4 animate-spin"
+                />
+                <RefreshCw
+                  v-else
+                  class="h-4 w-4"
+                />
+                重试
+              </button>
+              <button
+                class="admin-card-copy"
+                type="button"
+                @click="copyPrompt(job)"
+              >
+                <Copy class="h-4 w-4" />
+                复制提示词
+              </button>
+            </div>
           </article>
         </div>
 
@@ -1389,6 +1482,12 @@ onMounted(() => {
 
 .admin-time small {
   color: hsl(var(--muted-foreground));
+}
+
+.admin-row-actions,
+.admin-card-actions {
+  display: flex;
+  gap: 0.4rem;
 }
 
 .admin-mobile-list {
