@@ -3767,42 +3767,44 @@ onBeforeUnmount(() => {
                         class="h-full w-full cursor-pointer object-contain transition-opacity hover:opacity-90"
                         @click="openImageGallery(currentResultImages, activeResultImageIndex)"
                       />
-                      <template v-if="currentResultImages.length > 1">
-                        <button
-                          type="button"
-                          class="absolute left-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
-                          @click.stop="showPreviousResultImage"
-                        >
-                          <ChevronLeft class="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
-                          class="absolute right-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
-                          @click.stop="showNextResultImage"
-                        >
-                          <ChevronRight class="h-4 w-4" />
-                        </button>
-                        <div class="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white">
-                          {{ activeResultImageIndex + 1 }}/{{ currentResultImages.length }}
+                      <div class="pointer-events-none absolute inset-0 z-10">
+                        <template v-if="currentResultImages.length > 1">
+                          <button
+                            type="button"
+                            class="pointer-events-auto absolute left-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+                            @click.stop="showPreviousResultImage"
+                          >
+                            <ChevronLeft class="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            class="pointer-events-auto absolute right-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+                            @click.stop="showNextResultImage"
+                          >
+                            <ChevronRight class="h-4 w-4" />
+                          </button>
+                          <div class="absolute left-2 top-2 rounded bg-black/60 px-2 py-1 text-xs font-medium text-white">
+                            {{ activeResultImageIndex + 1 }}/{{ currentResultImages.length }}
+                          </div>
+                        </template>
+                        <div class="absolute bottom-2 right-2 flex gap-1">
+                          <button
+                            type="button"
+                            class="pointer-events-auto inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                            title="继续编辑"
+                            @click.stop="store.continueWithResult(activeResultImage)"
+                          >
+                            <Pencil class="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            class="pointer-events-auto inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+                            title="下载"
+                            @click.stop="downloadImage(activeResultImage, activeResultImageIndex)"
+                          >
+                            <Download class="h-4 w-4" />
+                          </button>
                         </div>
-                      </template>
-                      <div class="absolute bottom-2 right-2 flex gap-1">
-                        <button
-                          type="button"
-                          class="inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-                          title="继续编辑"
-                          @click.stop="store.continueWithResult(activeResultImage)"
-                        >
-                          <Pencil class="h-4 w-4" />
-                        </button>
-                        <button
-                          type="button"
-                          class="inline-flex h-8 w-8 items-center justify-center rounded-md bg-secondary text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-                          title="下载"
-                          @click.stop="downloadImage(activeResultImage, activeResultImageIndex)"
-                        >
-                          <Download class="h-4 w-4" />
-                        </button>
                       </div>
                     </div>
 
