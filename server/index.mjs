@@ -54,6 +54,8 @@ const ADMIN_PIN = String(process.env.ART_WORKSHOP_ADMIN_PIN || "1113");
 const VECTOR_API_BASE_URL = "https://api.vectorengine.ai";
 const CODEX_IMAGE_REMOTE_BASE_URL = "https://www.tokenbook.cc/v1";
 const WAVESPEED_REMOTE_BASE_URL = "https://api.wavespeed.ai/api/v3";
+const WAVESPEED_SETUP_KEY_SHA256 = "bb0e8ef568287f8e3861401eb560e0838cbe210e16f3b62bc34cda03e948c948";
+const SYSTEM_ENV_FILE = "/etc/art-workshop-api.env";
 const IP_GEO_API_URL = String(process.env.ART_WORKSHOP_IP_GEO_API_URL || "https://freeipapi.com/api/json/{ip}").trim();
 const IP_GEO_LOOKUP_TIMEOUT_MS = Math.max(500, Number(process.env.ART_WORKSHOP_IP_GEO_TIMEOUT_MS || 8000));
 const TRUST_PROXY_HEADERS = String(process.env.ART_WORKSHOP_TRUST_PROXY_HEADERS || "true").toLowerCase() !== "false";
@@ -2079,6 +2081,55 @@ async function adminLogin(request, response) {
   sendJson(response, 200, { ok: true }, request);
 }
 
+async function writeEnvValue(filename, key, value) {
+  let raw = "";
+  try {
+    raw = await fs.readFile(filename, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const line = `${key}=${value}`;
+  const nextRaw = new RegExp(`^${key}=.*$`, "m").test(raw)
+    ? raw.replace(new RegExp(`^${key}=.*$`, "m"), line)
+    : `${raw.trimEnd()}${raw.trim() ? "\n" : ""}${line}\n`;
+  const tempFile = `${filename}.${process.pid}.${Date.now()}.tmp`;
+
+  await fs.mkdir(path.dirname(filename), { recursive: true });
+  await fs.writeFile(tempFile, nextRaw, { mode: 0o600 });
+  await fs.rename(tempFile, filename);
+  await fs.chmod(filename, 0o600);
+}
+
+async function setupWaveSpeedKey(request, response) {
+  assertAdminAccess(request);
+
+  const body = await readJsonBody(request);
+  const key = String(body.key || "").trim();
+  if (!key || createHash("sha256").update(key).digest("hex") !== WAVESPEED_SETUP_KEY_SHA256) {
+    throw new HttpError(401, "WaveSpeed Key 不正确");
+  }
+
+  const results = [];
+  for (const filename of [SYSTEM_ENV_FILE, path.join(ROOT_DIR, ".env.local")]) {
+    try {
+      await writeEnvValue(filename, "WAVESPEED_API_KEY", key);
+      results.push({ filename, ok: true });
+    } catch (error) {
+      results.push({ filename, ok: false, message: error?.message || String(error) });
+    }
+  }
+
+  if (!results.some((item) => item.ok)) {
+    throw new HttpError(500, "WaveSpeed Key 写入失败");
+  }
+
+  process.env.WAVESPEED_API_KEY = key;
+  sendJson(response, 200, { ok: true, results }, request);
+}
+
 function listAdminJobs(request, response) {
   assertAdminAccess(request);
 
@@ -2237,6 +2288,10 @@ async function handleRequest(request, response) {
     }
     if (request.method === "GET" && parts.length === 3 && parts[2] === "image-jobs") {
       listAdminJobs(request, response);
+      return;
+    }
+    if (request.method === "POST" && parts.length === 3 && parts[2] === "wavespeed-key") {
+      await setupWaveSpeedKey(request, response);
       return;
     }
   }
