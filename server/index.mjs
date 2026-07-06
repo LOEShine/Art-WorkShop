@@ -66,6 +66,8 @@ const WAVESPEED_IMAGE_MODEL_IDS = new Set([
   "nano-banana-2",
   "seedream-4.5",
   "wan-2.7",
+  "ultimate-image-upscaler",
+  "qwen-image-layered",
   "qwen-image-edit-multiple-angles",
 ]);
 
@@ -673,6 +675,10 @@ function isWaveSpeedImageModel(model) {
   return WAVESPEED_IMAGE_MODEL_IDS.has(String(model || ""));
 }
 
+function isPromptOptionalImageModel(model) {
+  return ["ultimate-image-upscaler", "qwen-image-layered"].includes(String(model || ""));
+}
+
 function normalizeCodexImageApiBaseUrl(baseUrl) {
   const trimmed = String(baseUrl || "").trim().replace(/\/+$/, "");
   if (!trimmed || /sgdr\.funai\.vip/i.test(trimmed)) {
@@ -836,6 +842,15 @@ function normalizeWaveSpeedBackground(value) {
 
 function normalizeWaveSpeedGptImage15Size(value) {
   return normalizeWaveSpeedSize(value) || "auto";
+}
+
+function normalizeWaveSpeedLayerCount(value) {
+  const count = Math.floor(Number(value));
+  if (!Number.isFinite(count)) {
+    return 4;
+  }
+
+  return Math.min(Math.max(count, 2), 8);
 }
 
 function fitWaveSpeedDimensionSize(width, height) {
@@ -1051,6 +1066,12 @@ function buildGeminiParts(prompt, sourceImages) {
   return parts;
 }
 
+function isNonErrorStatusText(value) {
+  return /^(success|succeeded|completed|done|finished|ok|created|processing|running|queued|pending)$/i.test(
+    String(value || "").trim(),
+  );
+}
+
 function extractErrorMessage(value, seen = new WeakSet()) {
   if (!value) {
     return "";
@@ -1058,7 +1079,10 @@ function extractErrorMessage(value, seen = new WeakSet()) {
 
   if (typeof value === "string") {
     const trimmed = value.trim();
-    return trimmed && !/^https?:\/\//i.test(trimmed) ? trimmed : "";
+    if (/^<!doctype html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
+      return "";
+    }
+    return trimmed && !/^https?:\/\//i.test(trimmed) && !isNonErrorStatusText(trimmed) ? trimmed : "";
   }
 
   if (typeof value !== "object") {
@@ -1071,7 +1095,7 @@ function extractErrorMessage(value, seen = new WeakSet()) {
   seen.add(value);
 
   const record = value;
-  for (const key of ["error", "message", "detail", "fail_reason", "status_msg", "msg"]) {
+  for (const key of ["error", "fail_reason", "detail", "status_msg", "message", "msg", "raw"]) {
     if (record[key]) {
       const nested = extractErrorMessage(record[key], seen);
       if (nested) {
@@ -1090,7 +1114,25 @@ function extractErrorMessage(value, seen = new WeakSet()) {
     return "";
   }
 
-  for (const nestedValue of Object.values(record)) {
+  const ignoredKeys = new Set([
+    "id",
+    "code",
+    "model",
+    "status",
+    "state",
+    "success",
+    "outputs",
+    "images",
+    "image_urls",
+    "urls",
+    "created_at",
+    "timings",
+    "has_nsfw_contents",
+  ]);
+  for (const [key, nestedValue] of Object.entries(record)) {
+    if (ignoredKeys.has(key)) {
+      continue;
+    }
     const nested = extractErrorMessage(nestedValue, seen);
     if (nested) {
       return nested;
@@ -1148,11 +1190,11 @@ async function pollWaveSpeedPrediction(id) {
       return payload;
     }
     if (status === "failed" || status === "error") {
-      throw new Error(extractErrorMessage(payload) || "WaveSpeed 多角度生成失败");
+      throw new Error(extractErrorMessage(payload) || "WaveSpeed 生成失败");
     }
   }
 
-  throw new Error(extractErrorMessage(lastPayload) || "WaveSpeed 多角度生成超时");
+  throw new Error(extractErrorMessage(lastPayload) || "WaveSpeed 生成超时");
 }
 
 function extractGeneratedImages(payload, model) {
@@ -1422,6 +1464,36 @@ async function generateImages(payload) {
       ...(size ? { size } : {}),
       ...(sourceImages.length === 0 ? { thinking_mode: config.thinkingMode !== false } : {}),
       ...(Number.isFinite(seed) ? { seed: Math.floor(seed) } : {}),
+    };
+  } else if (model === "ultimate-image-upscaler") {
+    if (sourceImages.length === 0) {
+      throw new Error("高清放大需要先上传参考图片");
+    }
+
+    endpoint = buildApiUrl(WAVESPEED_REMOTE_BASE_URL, "/wavespeed-ai/ultimate-image-upscaler");
+    body = {
+      image: sourceImages[0],
+      target_resolution: normalizeWaveSpeedResolution(config.targetResolution || config.resolution, "4k", [
+        "2k",
+        "4k",
+        "8k",
+      ]),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "jpeg", ["jpeg", "png", "webp"]),
+      enable_sync_mode: false,
+      enable_base64_output: false,
+    };
+  } else if (model === "qwen-image-layered") {
+    if (sourceImages.length === 0) {
+      throw new Error("图片分层需要先上传参考图片");
+    }
+
+    endpoint = buildApiUrl(WAVESPEED_REMOTE_BASE_URL, "/wavespeed-ai/qwen-image/layered");
+    body = {
+      image: sourceImages[0],
+      ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
+      num_layers: normalizeWaveSpeedLayerCount(config.numLayers || config.num_layers),
+      enable_sync_mode: false,
+      enable_base64_output: false,
     };
   } else {
     throw new Error(`不支持的图像模型：${model}`);
@@ -1983,11 +2055,14 @@ async function createImageJob(request, response) {
   const clientRequestId = sanitizeId(body.clientRequestId, "");
   const model = sanitizeString(body.model, 80);
   const prompt = sanitizeString(body.prompt, 30000);
-  if (!model || !prompt.trim()) {
+  const sourceImages = Array.isArray(body.sourceImages) ? body.sourceImages.filter(Boolean).map(String) : [];
+  if (!model || (!prompt.trim() && !isPromptOptionalImageModel(model))) {
     throw new HttpError(400, "缺少模型或提示词");
   }
+  if (isPromptOptionalImageModel(model) && sourceImages.length === 0) {
+    throw new HttpError(400, "请先上传参考图片");
+  }
 
-  const sourceImages = Array.isArray(body.sourceImages) ? body.sourceImages.filter(Boolean).map(String) : [];
   const config = body.config && typeof body.config === "object" ? body.config : {};
   const promptMetadata = sanitizePromptMetadata(body.promptMetadata, prompt, sourceImages.length);
   const submissionInfo = buildSubmissionInfo(request, body);

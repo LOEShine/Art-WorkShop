@@ -294,6 +294,12 @@ function getImageModelIcon(modelId: string) {
   if (modelId === "wan-2.7") {
     return WanIcon;
   }
+  if (modelId === "ultimate-image-upscaler") {
+    return Maximize2;
+  }
+  if (modelId === "qwen-image-layered") {
+    return Layers;
+  }
 
   return OpenAiIcon;
 }

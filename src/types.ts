@@ -9,6 +9,8 @@ export type ImageModelId =
   | "nano-banana-2"
   | "seedream-4.5"
   | "wan-2.7"
+  | "ultimate-image-upscaler"
+  | "qwen-image-layered"
   | "qwen-image-edit-multiple-angles";
 
 export type VideoModelId = "veo3" | "hailuo" | "seedance" | "sora";

@@ -224,12 +224,13 @@ export async function loadImageHistory(limit = 20): Promise<ImageTask[]> {
 export async function saveImageHistoryTask(task: ImageTask, limit = 20): Promise<void> {
   const database = await getDatabase();
   const transaction = database.transaction(IMAGE_HISTORY_STORE, "readwrite");
+  const storedTask = prepareImageTaskForStorage(task);
 
-  await transaction.store.put(task);
+  await transaction.store.put(storedTask);
 
   const tasks = await transaction.store.getAll();
   const retainedTasks: ImageTask[] = [];
-  for (const currentTask of [task, ...tasks.filter((item) => item.id !== task.id)]) {
+  for (const currentTask of [storedTask, ...tasks.filter((item) => item.id !== storedTask.id)]) {
     if (retainedTasks.some((item) => isSameImageTaskIdentity(item, currentTask))) {
       await transaction.store.delete(currentTask.id);
       continue;

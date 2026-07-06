@@ -11,7 +11,9 @@ import {
   Download,
   Image as ImageIcon,
   Infinity as InfinityIcon,
+  Layers,
   LoaderCircle,
+  Maximize2,
   Moon,
   Pencil,
   Play,
@@ -44,6 +46,8 @@ import {
   createDefaultImageConfigs,
   IMAGE_MODELS,
   IMAGE_UPLOAD_LIMITS,
+  isImagePromptOptionalModel,
+  isImageSourceRequiredModel,
 } from "@/data/image-models";
 import { STARTER_PROMPTS } from "@/data/starter-prompts";
 import {
@@ -238,6 +242,12 @@ function getImageModelIcon(modelId: string) {
   if (modelId === "wan-2.7") {
     return WanIcon;
   }
+  if (modelId === "ultimate-image-upscaler") {
+    return Maximize2;
+  }
+  if (modelId === "qwen-image-layered") {
+    return Layers;
+  }
 
   return OpenAiIcon;
 }
@@ -380,7 +390,8 @@ const viewRotationPrompt = computed(() => {
   }
   return `改变角度，将相机旋转到${promptDescription}`;
 });
-const imageGenerationRequiresSource = computed(() => effectiveImageModelId.value === "qwen-image-edit-multiple-angles");
+const imageGenerationRequiresSource = computed(() => isImageSourceRequiredModel(effectiveImageModelId.value));
+const imageGenerationPromptOptional = computed(() => isImagePromptOptionalModel(effectiveImageModelId.value));
 const isImageTaskBusy = computed(() =>
   store.currentTask?.status === "generating" || store.currentTask?.status === "caching",
 );
@@ -388,11 +399,36 @@ const imageActionLabel = computed(() => {
   if (store.currentTask?.status === "caching") {
     return "加载图片...";
   }
+  if (effectiveImageModelId.value === "ultimate-image-upscaler") {
+    return store.isGenerating ? "放大中..." : "开始放大";
+  }
+  if (effectiveImageModelId.value === "qwen-image-layered") {
+    return store.isGenerating ? "分层中..." : "开始分层";
+  }
   return store.isGenerating ? "生成中..." : "开始生成";
+});
+const imagePromptPlaceholder = computed(() => {
+  if (cameraParametersEnabled.value || viewRotationEnabled.value) {
+    return "";
+  }
+  if (effectiveImageModelId.value === "ultimate-image-upscaler") {
+    return "无需提示词，上传图片后直接高清放大...";
+  }
+  if (effectiveImageModelId.value === "qwen-image-layered") {
+    return "可选：描述画面内容，帮助模型更准确分层...";
+  }
+  return "输入提示词，生成图片...";
+});
+const currentImageErrorMessage = computed(() => {
+  const message = String(store.currentTask?.error || "").trim();
+  if (!message || /^(success|succeeded|completed|done|ok)$/i.test(message)) {
+    return "官方返回任务失败，但没有提供具体原因。";
+  }
+  return message;
 });
 const canGenerateImage = computed(
   () =>
-    buildEffectiveImagePrompt().length > 0 &&
+    (imageGenerationPromptOptional.value || buildEffectiveImagePrompt().length > 0) &&
     !submittingImage.value &&
     !isImageTaskBusy.value &&
     (!imageGenerationRequiresSource.value || buildEffectiveSourceImages().length > 0),
@@ -2081,6 +2117,10 @@ function buildGenerationImageConfig(model: ImageModelId) {
 }
 
 function buildGenerationImagePrompt(model: ImageModelId) {
+  if (model === "ultimate-image-upscaler") {
+    return "";
+  }
+
   if (model !== "qwen-image-edit-multiple-angles") {
     return buildEffectiveImagePrompt();
   }
@@ -2132,7 +2172,7 @@ function buildEffectiveSourceImages() {
     return [store.uploadedImages[0]];
   }
 
-  return [...store.uploadedImages];
+  return store.uploadedImages.slice(0, currentImageUploadLimit.value);
 }
 
 function openCameraParameters() {
@@ -2703,10 +2743,10 @@ async function handleGenerateImage() {
 
   submittingImage.value = true;
   const startedAt = Date.now();
-  const imagePrompt = buildEffectiveImagePrompt();
   const generationModel = effectiveImageModelId.value;
   const generationConfig = buildGenerationImageConfig(generationModel);
   const generationPrompt = buildGenerationImagePrompt(generationModel);
+  const imagePrompt = generationModel === "ultimate-image-upscaler" ? "" : buildEffectiveImagePrompt();
   const sourceImages = buildEffectiveSourceImages();
   const promptMetadata = buildImagePromptMetadata(generationModel, generationPrompt, sourceImages.length);
   const usesCodexImageKey = generationModel === "codex-image-2";
@@ -3542,7 +3582,7 @@ onBeforeUnmount(() => {
                       <textarea
                         ref="promptTextarea"
                         :value="store.prompt"
-                        :placeholder="hasPromptSystemTokens ? '' : '输入提示词，生成图片...'"
+                        :placeholder="imagePromptPlaceholder"
                         class="block min-h-24 w-full resize-none overflow-hidden rounded-t-md border-0 bg-transparent px-3 py-2 text-sm shadow-none placeholder:text-muted-foreground focus-visible:outline-none"
                         :class="[optimizingPrompt ? 'prompt-textarea--busy' : '', hasPromptSystemTokens ? 'prompt-textarea--with-system' : '']"
                         @keydown="handlePromptKeydown"
@@ -3758,7 +3798,7 @@ onBeforeUnmount(() => {
                   class="rounded-md bg-destructive/10 p-3 text-center"
                 >
                   <p class="text-sm text-destructive">生成失败</p>
-                  <p class="text-xs text-muted-foreground">{{ store.currentTask.error }}</p>
+                  <p class="text-xs text-muted-foreground">{{ currentImageErrorMessage }}</p>
                 </div>
               </div>
             </div>

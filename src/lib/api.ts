@@ -192,6 +192,8 @@ const WAVESPEED_IMAGE_MODEL_IDS = new Set<ImageModelId>([
   "nano-banana-2",
   "seedream-4.5",
   "wan-2.7",
+  "ultimate-image-upscaler",
+  "qwen-image-layered",
   "qwen-image-edit-multiple-angles",
 ]);
 
@@ -307,6 +309,12 @@ export function isSuccessStatus(status: string): boolean {
   return /success|succeeded|completed|done|finished/i.test(String(status || ""));
 }
 
+function isNonErrorStatusText(value: string): boolean {
+  return /^(success|succeeded|completed|done|finished|ok|created|processing|running|queued|pending)$/i.test(
+    value.trim(),
+  );
+}
+
 export function extractErrorMessage(value: unknown, seen = new WeakSet<object>()): string {
   if (!value) {
     return "";
@@ -317,7 +325,7 @@ export function extractErrorMessage(value: unknown, seen = new WeakSet<object>()
     if (/^<!doctype html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
       return "";
     }
-    return trimmed && !/^https?:\/\//i.test(trimmed) ? trimmed : "";
+    return trimmed && !/^https?:\/\//i.test(trimmed) && !isNonErrorStatusText(trimmed) ? trimmed : "";
   }
 
   if (typeof value !== "object") {
@@ -330,7 +338,7 @@ export function extractErrorMessage(value: unknown, seen = new WeakSet<object>()
   seen.add(value);
 
   const record = value as Record<string, unknown>;
-  const keys = ["error", "message", "detail", "fail_reason", "status_msg", "msg"];
+  const keys = ["error", "fail_reason", "detail", "status_msg", "message", "msg", "raw"];
   for (const key of keys) {
     if (record[key]) {
       const nested = extractErrorMessage(record[key], seen);
@@ -350,7 +358,25 @@ export function extractErrorMessage(value: unknown, seen = new WeakSet<object>()
     return "";
   }
 
-  for (const nestedValue of Object.values(record)) {
+  const ignoredKeys = new Set([
+    "id",
+    "code",
+    "model",
+    "status",
+    "state",
+    "success",
+    "outputs",
+    "images",
+    "image_urls",
+    "urls",
+    "created_at",
+    "timings",
+    "has_nsfw_contents",
+  ]);
+  for (const [key, nestedValue] of Object.entries(record)) {
+    if (ignoredKeys.has(key)) {
+      continue;
+    }
     const nested = extractErrorMessage(nestedValue, seen);
     if (nested) {
       return nested;
@@ -960,6 +986,15 @@ function normalizeWaveSpeedGptImage15Size(value: unknown): string {
   return normalizeWaveSpeedSize(value) || "auto";
 }
 
+function normalizeWaveSpeedLayerCount(value: unknown): number {
+  const count = Math.floor(Number(value));
+  if (!Number.isFinite(count)) {
+    return 4;
+  }
+
+  return Math.min(Math.max(count, 2), 8);
+}
+
 function fitWaveSpeedDimensionSize(width: number, height: number): string {
   const maxDimension = 1536;
   const minDimension = 256;
@@ -1134,11 +1169,11 @@ async function pollWaveSpeedPrediction(id: string): Promise<Record<string, unkno
       return payload;
     }
     if (status === "failed" || status === "error") {
-      throw new Error(extractErrorMessage(payload) || "WaveSpeed 多角度生成失败");
+      throw new Error(extractErrorMessage(payload) || "WaveSpeed 生成失败");
     }
   }
 
-  throw new Error(extractErrorMessage(lastPayload) || "WaveSpeed 多角度生成超时");
+  throw new Error(extractErrorMessage(lastPayload) || "WaveSpeed 生成超时");
 }
 
 export async function optimizeImagePrompt(
@@ -1369,6 +1404,36 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
       ...(normalizeWaveSpeedSize(config.size) ? { size: normalizeWaveSpeedSize(config.size) } : {}),
       ...(sourceImages.length === 0 ? { thinking_mode: config.thinkingMode !== false } : {}),
       ...(Number.isFinite(seed) ? { seed: Math.floor(seed) } : {}),
+    };
+  } else if (model === "ultimate-image-upscaler") {
+    if (sourceImages.length === 0) {
+      throw new Error("高清放大需要先上传参考图片");
+    }
+
+    endpoint = buildApiUrl(WAVESPEED_API_BASE_URL, "/wavespeed-ai/ultimate-image-upscaler");
+    body = {
+      image: sourceImages[0],
+      target_resolution: normalizeWaveSpeedResolution(config.targetResolution || config.resolution, "4k", [
+        "2k",
+        "4k",
+        "8k",
+      ]),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "jpeg", ["jpeg", "png", "webp"]),
+      enable_sync_mode: false,
+      enable_base64_output: false,
+    };
+  } else if (model === "qwen-image-layered") {
+    if (sourceImages.length === 0) {
+      throw new Error("图片分层需要先上传参考图片");
+    }
+
+    endpoint = buildApiUrl(WAVESPEED_API_BASE_URL, "/wavespeed-ai/qwen-image/layered");
+    body = {
+      image: sourceImages[0],
+      ...(prompt.trim() ? { prompt: prompt.trim() } : {}),
+      num_layers: normalizeWaveSpeedLayerCount(config.numLayers || config.num_layers),
+      enable_sync_mode: false,
+      enable_base64_output: false,
     };
   }
 

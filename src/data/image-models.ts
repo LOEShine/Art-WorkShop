@@ -8,6 +8,8 @@ export const IMAGE_UPLOAD_LIMITS: Record<ImageModelId, number> = {
   "nano-banana-2": 14,
   "seedream-4.5": 10,
   "wan-2.7": 9,
+  "ultimate-image-upscaler": 1,
+  "qwen-image-layered": 1,
   "qwen-image-edit-multiple-angles": 3,
 };
 
@@ -305,6 +307,55 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
     ],
   },
   {
+    id: "ultimate-image-upscaler",
+    name: "Ultimate Upscale",
+    description: "WaveSpeed Ultimate Image Upscaler",
+    options: [
+      {
+        key: "targetResolution",
+        label: "目标分辨率",
+        default: "4k",
+        preview: true,
+        options: [
+          { value: "2k", label: "2K" },
+          { value: "4k", label: "4K" },
+          { value: "8k", label: "8K" },
+        ],
+      },
+      {
+        key: "outputFormat",
+        label: "格式",
+        default: "jpeg",
+        compact: true,
+        options: [
+          { value: "jpeg", label: "JPEG" },
+          { value: "png", label: "PNG" },
+          { value: "webp", label: "WebP" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "qwen-image-layered",
+    name: "Qwen Layered",
+    description: "WaveSpeed Qwen Image Layered RGBA 分层",
+    options: [
+      {
+        key: "numLayers",
+        label: "分层数量",
+        default: 4,
+        compact: true,
+        options: Array.from({ length: 7 }, (_, index) => {
+          const value = index + 2;
+          return {
+            value,
+            label: `${value} 层`,
+          };
+        }),
+      },
+    ],
+  },
+  {
     id: "qwen-image-edit-multiple-angles",
     name: "多角度",
     description: "WaveSpeed 多角度图像编辑模型",
@@ -346,6 +397,25 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
 ];
 
 export const DEFAULT_IMAGE_MODEL_ID: ImageModelId = "gpt-image-1.5";
+
+export const IMAGE_SOURCE_REQUIRED_MODEL_IDS = new Set<ImageModelId>([
+  "ultimate-image-upscaler",
+  "qwen-image-layered",
+  "qwen-image-edit-multiple-angles",
+]);
+
+export const IMAGE_PROMPT_OPTIONAL_MODEL_IDS = new Set<ImageModelId>([
+  "ultimate-image-upscaler",
+  "qwen-image-layered",
+]);
+
+export function isImageSourceRequiredModel(modelId: ImageModelId): boolean {
+  return IMAGE_SOURCE_REQUIRED_MODEL_IDS.has(modelId);
+}
+
+export function isImagePromptOptionalModel(modelId: ImageModelId): boolean {
+  return IMAGE_PROMPT_OPTIONAL_MODEL_IDS.has(modelId);
+}
 
 export function createDefaultImageConfigs(): ImageModelConfigs {
   return IMAGE_MODELS.reduce((configs, model) => {
