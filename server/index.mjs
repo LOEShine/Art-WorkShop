@@ -679,6 +679,10 @@ function isPromptOptionalImageModel(model) {
   return ["ultimate-image-upscaler", "qwen-image-layered"].includes(String(model || ""));
 }
 
+function isSourceRequiredImageModel(model) {
+  return ["ultimate-image-upscaler", "qwen-image-layered", "qwen-image-edit-multiple-angles"].includes(String(model || ""));
+}
+
 function normalizeCodexImageApiBaseUrl(baseUrl) {
   const trimmed = String(baseUrl || "").trim().replace(/\/+$/, "");
   if (!trimmed || /sgdr\.funai\.vip/i.test(trimmed)) {
@@ -2056,11 +2060,14 @@ async function createImageJob(request, response) {
   const model = sanitizeString(body.model, 80);
   const prompt = sanitizeString(body.prompt, 30000);
   const sourceImages = Array.isArray(body.sourceImages) ? body.sourceImages.filter(Boolean).map(String) : [];
-  if (!model || (!prompt.trim() && !isPromptOptionalImageModel(model))) {
-    throw new HttpError(400, "缺少模型或提示词");
+  if (!model) {
+    throw new HttpError(400, "缺少模型");
   }
-  if (isPromptOptionalImageModel(model) && sourceImages.length === 0) {
+  if (isSourceRequiredImageModel(model) && sourceImages.length === 0) {
     throw new HttpError(400, "请先上传参考图片");
+  }
+  if (!prompt.trim() && !isPromptOptionalImageModel(model)) {
+    throw new HttpError(400, "缺少提示词");
   }
 
   const config = body.config && typeof body.config === "object" ? body.config : {};
