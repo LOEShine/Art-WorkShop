@@ -1,12 +1,42 @@
 import http from "node:http";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, "..");
+const EXISTING_ENV_KEYS = new Set(Object.keys(process.env));
+
+function loadEnvFile(filename) {
+  let raw = "";
+  try {
+    raw = readFileSync(path.join(ROOT_DIR, filename), "utf8");
+  } catch {
+    return;
+  }
+
+  for (const line of raw.split(/\r?\n/)) {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match || EXISTING_ENV_KEYS.has(match[1])) {
+      continue;
+    }
+
+    let value = match[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[match[1]] = value;
+  }
+}
+
+loadEnvFile(".env");
+loadEnvFile(".env.local");
+
 const PORT = Number(process.env.ART_WORKSHOP_API_PORT || 8787);
 const HOST = process.env.ART_WORKSHOP_API_HOST || "127.0.0.1";
 const STORAGE_DIR = path.resolve(process.env.ART_WORKSHOP_STORAGE_DIR || path.join(ROOT_DIR, "server-data"));
@@ -29,6 +59,15 @@ const IP_GEO_LOOKUP_TIMEOUT_MS = Math.max(500, Number(process.env.ART_WORKSHOP_I
 const TRUST_PROXY_HEADERS = String(process.env.ART_WORKSHOP_TRUST_PROXY_HEADERS || "true").toLowerCase() !== "false";
 const CODEX_IMAGE_LEGACY_API_KEY = "sk-0427d5c8903aabdf3d0df00a85d33fbc6a8bce0811cc231b4dd54622c74f16fa";
 const CODEX_IMAGE_REPLACEMENT_API_KEY = "sk-09b7dd6f5f936a2576fabb314eb821d80be5daba9cebfa5a822ca9bc0bf3cfb7";
+const WAVESPEED_IMAGE_MODEL_IDS = new Set([
+  "gpt-image-1.5",
+  "gpt-image-1.5-official",
+  "gemini-3-pro-image-preview",
+  "nano-banana-2",
+  "seedream-4.5",
+  "wan-2.7",
+  "qwen-image-edit-multiple-angles",
+]);
 
 const jobs = new Map();
 const runtimePayloads = new Map();
@@ -630,6 +669,10 @@ function resolveCodexImageApiKey(apiKey) {
   return trimmed === CODEX_IMAGE_LEGACY_API_KEY ? CODEX_IMAGE_REPLACEMENT_API_KEY : trimmed;
 }
 
+function isWaveSpeedImageModel(model) {
+  return WAVESPEED_IMAGE_MODEL_IDS.has(String(model || ""));
+}
+
 function normalizeCodexImageApiBaseUrl(baseUrl) {
   const trimmed = String(baseUrl || "").trim().replace(/\/+$/, "");
   if (!trimmed || /sgdr\.funai\.vip/i.test(trimmed)) {
@@ -696,6 +739,103 @@ function normalizeWaveSpeedSize(value) {
   }
 
   return `${Math.round(width)}*${Math.round(height)}`;
+}
+
+function parseImageSize(value) {
+  const match = String(value || "")
+    .trim()
+    .match(/^(\d+)[x*](\d+)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null;
+}
+
+function getClosestWaveSpeedAspectRatio(
+  width,
+  height,
+  allowedRatios = ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return undefined;
+  }
+
+  const target = width / height;
+  let closest = "";
+  let closestDelta = Number.POSITIVE_INFINITY;
+  for (const ratio of allowedRatios) {
+    const [ratioWidth, ratioHeight] = ratio.split(":").map(Number);
+    if (!ratioWidth || !ratioHeight) {
+      continue;
+    }
+    const delta = Math.abs(target - ratioWidth / ratioHeight);
+    if (delta < closestDelta) {
+      closest = ratio;
+      closestDelta = delta;
+    }
+  }
+
+  return closestDelta <= 0.03 ? closest : undefined;
+}
+
+function getWaveSpeedAspectRatioFromSize(value, allowedRatios) {
+  const parsed = parseImageSize(value);
+  return parsed ? getClosestWaveSpeedAspectRatio(parsed.width, parsed.height, allowedRatios) : undefined;
+}
+
+function getWaveSpeedResolutionFromSize(value, fallback = "1k") {
+  const parsed = parseImageSize(value);
+  if (!parsed) {
+    return fallback;
+  }
+
+  const maxDimension = Math.max(parsed.width, parsed.height);
+  if (maxDimension >= 3000) {
+    return "4k";
+  }
+  if (maxDimension > 1536) {
+    return "2k";
+  }
+  return "1k";
+}
+
+function normalizeWaveSpeedAspectRatio(
+  value,
+  allowedRatios = ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+) {
+  const aspectRatio = String(value || "").trim();
+  if (!aspectRatio || aspectRatio === "auto") {
+    return undefined;
+  }
+
+  return allowedRatios.includes(aspectRatio) ? aspectRatio : undefined;
+}
+
+function normalizeWaveSpeedResolution(value, fallback = "1k", allowedResolutions = ["1k", "2k", "4k"]) {
+  const resolution = String(value || "").trim().toLowerCase();
+  return allowedResolutions.includes(resolution) ? resolution : fallback;
+}
+
+function normalizeWaveSpeedQuality(value) {
+  const quality = String(value || "").trim().toLowerCase();
+  return ["low", "medium", "high"].includes(quality) ? quality : "medium";
+}
+
+function normalizeWaveSpeedOutputFormat(value, fallback = "png", allowedFormats = ["png", "jpeg", "webp"]) {
+  const outputFormat = String(value || "").trim().toLowerCase();
+  return allowedFormats.includes(outputFormat) ? outputFormat : fallback;
+}
+
+function normalizeWaveSpeedBackground(value) {
+  const background = String(value || "").trim().toLowerCase();
+  return ["auto", "transparent", "opaque"].includes(background) ? background : "opaque";
+}
+
+function normalizeWaveSpeedGptImage15Size(value) {
+  return normalizeWaveSpeedSize(value) || "auto";
 }
 
 function fitWaveSpeedDimensionSize(width, height) {
@@ -1058,30 +1198,39 @@ function extractGeneratedImages(payload, model) {
     }
   }
 
-  if (model === "qwen-image-edit-multiple-angles") {
-    const root = payload.data || payload;
-    for (const collection of [root.outputs, root.images, root.image_urls, root.urls]) {
-      if (!Array.isArray(collection)) {
-        continue;
-      }
+  if (isWaveSpeedImageModel(model)) {
+    const roots = [payload, payload.data, payload.result, payload.output].filter(
+      (root) => root && typeof root === "object",
+    );
 
-      for (const item of collection) {
-        if (typeof item === "string" && item.trim()) {
-          images.push(item.startsWith("http") || item.startsWith("data:image") ? item : `data:image/png;base64,${item}`);
+    for (const root of roots) {
+      for (const collection of [root.outputs, root.images, root.image_urls, root.urls]) {
+        if (!Array.isArray(collection)) {
           continue;
         }
-        if (item && typeof item === "object") {
-          const url = String(item.url || item.image || item.output || "").trim();
-          if (url) {
-            images.push(url.startsWith("http") || url.startsWith("data:image") ? url : `data:image/png;base64,${url}`);
+
+        for (const item of collection) {
+          if (typeof item === "string" && item.trim()) {
+            images.push(item.startsWith("http") || item.startsWith("data:image") ? item : `data:image/png;base64,${item}`);
+            continue;
+          }
+          if (item && typeof item === "object") {
+            const url = String(item.url || item.image || item.output || "").trim();
+            if (url) {
+              images.push(url.startsWith("http") || url.startsWith("data:image") ? url : `data:image/png;base64,${url}`);
+            }
           }
         }
       }
-    }
 
-    const directImage = String(root.image || root.output_image || "").trim();
-    if (directImage) {
-      images.push(directImage.startsWith("http") || directImage.startsWith("data:image") ? directImage : `data:image/png;base64,${directImage}`);
+      const directImage = String(root.image || root.output_image || "").trim();
+      if (directImage) {
+        images.push(
+          directImage.startsWith("http") || directImage.startsWith("data:image")
+            ? directImage
+            : `data:image/png;base64,${directImage}`,
+        );
+      }
     }
   }
 
@@ -1094,14 +1243,20 @@ async function generateImages(payload) {
   const config = payload.config && typeof payload.config === "object" ? payload.config : {};
   const rawSourceImages = Array.isArray(payload.sourceImages) ? payload.sourceImages.filter(Boolean).map(String) : [];
   const sourceImages = await normalizeSourceImages(rawSourceImages);
-  const apiKey = model === "codex-image-2" ? resolveCodexImageApiKey(payload.apiKey) : String(payload.apiKey || "");
+  const usesWaveSpeed = isWaveSpeedImageModel(model);
+  const apiKey =
+    model === "codex-image-2"
+      ? resolveCodexImageApiKey(payload.apiKey)
+      : usesWaveSpeed
+        ? String(process.env.WAVESPEED_API_KEY || "")
+        : String(payload.apiKey || "");
   const apiBaseUrl =
     model === "codex-image-2"
       ? CODEX_IMAGE_REMOTE_BASE_URL
       : String(payload.apiBaseUrl || "") || VECTOR_API_BASE_URL;
 
-  if (model !== "qwen-image-edit-multiple-angles" && !apiKey.trim()) {
-    throw new Error("缺少 API Key");
+  if (!apiKey.trim()) {
+    throw new Error(usesWaveSpeed ? "服务端缺少 WAVESPEED_API_KEY" : "缺少 API Key");
   }
 
   let endpoint = buildApiUrl(apiBaseUrl, "/v1/images/generations");
@@ -1110,10 +1265,6 @@ async function generateImages(payload) {
   if (model === "qwen-image-edit-multiple-angles") {
     if (sourceImages.length === 0) {
       throw new Error("多角度生成需要先上传参考图片");
-    }
-    const wavespeedApiKey = process.env.WAVESPEED_API_KEY || "";
-    if (!wavespeedApiKey) {
-      throw new Error("服务端缺少 WAVESPEED_API_KEY");
     }
 
     const size = resolveWaveSpeedSize(config, sourceImages);
@@ -1125,27 +1276,46 @@ async function generateImages(payload) {
       horizontal_angle: normalizeDegrees360(config.horizontalAngle),
       vertical_angle: clampNumber(config.verticalAngle, -30, 60, 0),
       distance: clampNumber(config.distance, 0, 2, mapViewRotationZoomToWaveSpeedDistance(config.viewRotationZoom)),
-      output_format: String(config.outputFormat || "jpeg"),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "jpeg", ["jpeg", "png", "webp"]),
       enable_base64_output: false,
       enable_sync_mode: true,
       ...(size ? { size } : {}),
       ...(Number.isFinite(seed) && seed >= 0 ? { seed } : {}),
     };
   } else if (model === "gpt-image-1.5") {
+    const aspectRatio =
+      normalizeWaveSpeedAspectRatio(config.aspectRatio) ||
+      getWaveSpeedAspectRatioFromSize(config.size, [
+        "1:1",
+        "1:2",
+        "2:1",
+        "1:3",
+        "3:1",
+        "2:3",
+        "3:2",
+        "3:4",
+        "4:3",
+        "4:5",
+        "5:4",
+        "9:16",
+        "16:9",
+        "9:21",
+        "21:9",
+      ]);
+    endpoint = buildApiUrl(
+      WAVESPEED_REMOTE_BASE_URL,
+      sourceImages.length > 0 ? "/openai/gpt-image-2/edit" : "/openai/gpt-image-2/text-to-image",
+    );
     body = {
-      model: "gpt-image-2",
       prompt,
-      size: String(config.size || "auto"),
-      quality: "high",
-      n: normalizeImageCount(config.n),
-      background: "auto",
-      moderation: "low",
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 10) } : {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      resolution: normalizeWaveSpeedResolution(config.resolution || getWaveSpeedResolutionFromSize(config.size), "1k"),
+      quality: normalizeWaveSpeedQuality(config.quality),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "png"),
+      enable_sync_mode: false,
+      enable_base64_output: false,
     };
-
-    if (sourceImages.length > 0) {
-      endpoint = buildApiUrl(apiBaseUrl, "/v1/images/edits");
-      body.images = sourceImages;
-    }
   } else if (model === "codex-image-2") {
     body = {
       model: "gpt-image-2",
@@ -1160,74 +1330,115 @@ async function generateImages(payload) {
       endpoint = buildApiUrl(apiBaseUrl || CODEX_IMAGE_REMOTE_BASE_URL, "/images/generations");
     }
   } else if (model === "gpt-image-1.5-official") {
+    endpoint = buildApiUrl(
+      WAVESPEED_REMOTE_BASE_URL,
+      sourceImages.length > 0 ? "/openai/gpt-image-1.5/edit" : "/openai/gpt-image-1.5/text-to-image",
+    );
     body = {
-      model: "gpt-image-1.5",
       prompt,
-      size: String(config.size || "1024x1024"),
-      quality: "auto",
-      n: 1,
-      background: String(config.transparency || "auto"),
-      moderation: "auto",
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 10), input_fidelity: "high" } : {}),
+      size: normalizeWaveSpeedGptImage15Size(config.size),
+      quality: normalizeWaveSpeedQuality(config.quality),
+      background: normalizeWaveSpeedBackground(config.transparency),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "jpeg", ["jpeg", "png"]),
+      enable_sync_mode: false,
+      enable_base64_output: false,
     };
-
-    if (sourceImages.length > 0) {
-      endpoint = buildApiUrl(apiBaseUrl, "/v1/images/edits");
-      body.images = sourceImages;
-    }
-  } else if (model === "gemini-3-pro-image-preview") {
-    endpoint = `${buildApiUrl(apiBaseUrl, "/v1beta/models/gemini-3-pro-image-preview:generateContent")}?key=${encodeURIComponent(apiKey)}`;
-
-    let effectivePrompt = prompt;
-    if (config.aspectRatio && config.aspectRatio !== "auto") {
-      effectivePrompt = `${effectivePrompt}, aspect ratio ${config.aspectRatio}`;
-    }
-    if (config.imageSize && config.imageSize !== "auto") {
-      effectivePrompt = `${effectivePrompt}, ${config.imageSize} resolution`;
-    }
-
+  } else if (model === "nano-banana-2") {
+    const aspectRatio = normalizeWaveSpeedAspectRatio(config.aspectRatio, [
+      "1:1",
+      "3:2",
+      "2:3",
+      "3:4",
+      "4:3",
+      "4:5",
+      "5:4",
+      "9:16",
+      "16:9",
+      "21:9",
+      "1:4",
+      "4:1",
+      "1:8",
+      "8:1",
+    ]);
+    endpoint = buildApiUrl(
+      WAVESPEED_REMOTE_BASE_URL,
+      sourceImages.length > 0 ? "/google/nano-banana-2/edit" : "/google/nano-banana-2/text-to-image",
+    );
     body = {
-      contents: [
-        {
-          role: "user",
-          parts: buildGeminiParts(effectivePrompt, sourceImages),
-        },
-      ],
-      generationConfig: {
-        responseModalities: ["IMAGE"],
-        imageConfig:
-          config.aspectRatio !== "auto" || config.imageSize !== "auto"
-            ? {
-                ...(config.aspectRatio !== "auto" ? { aspectRatio: config.aspectRatio } : {}),
-                ...(config.imageSize !== "auto" ? { imageSize: config.imageSize } : {}),
-              }
-            : undefined,
-      },
+      prompt,
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 14) } : {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      resolution: normalizeWaveSpeedResolution(config.imageSize || config.resolution, "1k", [
+        "0.5k",
+        "1k",
+        "2k",
+        "4k",
+      ]),
+      enable_web_search: false,
+      enable_image_search: false,
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "png", ["png", "jpeg"]),
+      enable_sync_mode: false,
+      enable_base64_output: false,
+    };
+  } else if (model === "gemini-3-pro-image-preview") {
+    const aspectRatio = normalizeWaveSpeedAspectRatio(config.aspectRatio);
+    endpoint = buildApiUrl(
+      WAVESPEED_REMOTE_BASE_URL,
+      sourceImages.length > 0 ? "/google/nano-banana-pro/edit" : "/google/nano-banana-pro/text-to-image",
+    );
+    body = {
+      prompt,
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 14) } : {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      resolution: normalizeWaveSpeedResolution(config.imageSize || config.resolution, "1k"),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "png", ["png", "jpeg"]),
+      enable_sync_mode: false,
+      enable_base64_output: false,
+    };
+  } else if (model === "seedream-4.5") {
+    const size = normalizeWaveSpeedSize(config.size);
+    endpoint = buildApiUrl(
+      WAVESPEED_REMOTE_BASE_URL,
+      sourceImages.length > 0 ? "/bytedance/seedream-v4.5/edit" : "/bytedance/seedream-v4.5",
+    );
+    body = {
+      prompt,
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 10) } : {}),
+      ...(size ? { size } : {}),
+      enable_sync_mode: false,
+      enable_base64_output: false,
+    };
+  } else if (model === "wan-2.7") {
+    const size = normalizeWaveSpeedSize(config.size);
+    const seed = Number(config.seed);
+    endpoint = buildApiUrl(
+      WAVESPEED_REMOTE_BASE_URL,
+      sourceImages.length > 0 ? "/alibaba/wan-2.7/image-edit" : "/alibaba/wan-2.7/text-to-image",
+    );
+    body = {
+      prompt,
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 9) } : {}),
+      ...(size ? { size } : {}),
+      ...(sourceImages.length === 0 ? { thinking_mode: config.thinkingMode !== false } : {}),
+      ...(Number.isFinite(seed) ? { seed: Math.floor(seed) } : {}),
     };
   } else {
     throw new Error(`不支持的图像模型：${model}`);
   }
 
   const requestImagePayload = async (requestBody) => {
-    if (
-      (model === "gpt-image-1.5" || model === "codex-image-2" || model === "gpt-image-1.5-official") &&
-      sourceImages.length > 0
-    ) {
+    if (model === "codex-image-2" && sourceImages.length > 0) {
       const formData = new FormData();
       appendFormField(formData, "model", requestBody.model);
       appendFormField(formData, "prompt", requestBody.prompt);
       appendFormField(formData, "size", requestBody.size);
       appendFormField(formData, "n", requestBody.n || 1);
-      if (model !== "codex-image-2") {
-        appendFormField(formData, "quality", requestBody.quality);
-        appendFormField(formData, "background", requestBody.background || "auto");
-        appendFormField(formData, "moderation", requestBody.moderation || "auto");
-      }
 
       sourceImages.forEach((image, index) => {
         const { mimeType, buffer } = dataUrlToBuffer(image);
         const blob = new Blob([buffer], { type: mimeType });
-        const imageField = model === "codex-image-2" ? "image" : "image[]";
-        formData.append(imageField, blob, `image-${index + 1}.${getDataUrlImageExtension(image)}`);
+        formData.append("image", blob, `image-${index + 1}.${getDataUrlImageExtension(image)}`);
       });
 
       return fetchJson(endpoint, {
@@ -1243,9 +1454,7 @@ async function generateImages(payload) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(model === "qwen-image-edit-multiple-angles"
-          ? { Authorization: `Bearer ${process.env.WAVESPEED_API_KEY || ""}` }
-          : { Authorization: `Bearer ${apiKey}` }),
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(requestBody),
     });
@@ -1254,19 +1463,18 @@ async function generateImages(payload) {
   const splitMultiImageRequest = model === "gpt-image-1.5" || model === "codex-image-2";
   const requestedCount = splitMultiImageRequest ? normalizeImageCount(config.n) : 1;
   const requestBodies = splitMultiImageRequest
-    ? Array.from({ length: requestedCount }, () => ({ ...body, n: 1 }))
+    ? Array.from({ length: requestedCount }, () => (model === "codex-image-2" ? { ...body, n: 1 } : { ...body }))
     : [body];
   const payloadResults = await Promise.allSettled(requestBodies.map((requestBody) => requestImagePayload(requestBody)));
   let payloads = payloadResults.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
   const firstError = payloadResults.find((result) => result.status === "rejected")?.reason;
   let images = payloads.flatMap((result) => extractGeneratedImages(result, model));
 
-  if (model === "qwen-image-edit-multiple-angles" && images.length === 0 && payloads[0]) {
-    const predictionId = getWaveSpeedPredictionId(payloads[0]);
-    if (predictionId) {
-      const result = await pollWaveSpeedPrediction(predictionId);
-      payloads = [result];
-      images = extractGeneratedImages(result, model);
+  if (usesWaveSpeed && images.length === 0 && payloads.length > 0) {
+    const predictionIds = payloads.map((result) => getWaveSpeedPredictionId(result)).filter(Boolean);
+    if (predictionIds.length > 0) {
+      payloads = await Promise.all(predictionIds.map((predictionId) => pollWaveSpeedPrediction(predictionId)));
+      images = payloads.flatMap((result) => extractGeneratedImages(result, model));
     }
   }
 

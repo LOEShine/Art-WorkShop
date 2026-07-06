@@ -185,6 +185,19 @@ export const WAVESPEED_API_BASE_URL = "/wavespeed-api";
 export const IMAGE_JOB_API_BASE_URL = "/api";
 const CODEX_IMAGE_LEGACY_API_KEY = "sk-0427d5c8903aabdf3d0df00a85d33fbc6a8bce0811cc231b4dd54622c74f16fa";
 const CODEX_IMAGE_REPLACEMENT_API_KEY = "sk-09b7dd6f5f936a2576fabb314eb821d80be5daba9cebfa5a822ca9bc0bf3cfb7";
+const WAVESPEED_IMAGE_MODEL_IDS = new Set<ImageModelId>([
+  "gpt-image-1.5",
+  "gpt-image-1.5-official",
+  "gemini-3-pro-image-preview",
+  "nano-banana-2",
+  "seedream-4.5",
+  "wan-2.7",
+  "qwen-image-edit-multiple-angles",
+]);
+
+export function isWaveSpeedImageModel(model: ImageModelId): boolean {
+  return WAVESPEED_IMAGE_MODEL_IDS.has(model);
+}
 
 export function buildApiUrl(baseUrl: string, path: string): string {
   if (/^https?:\/\//i.test(path)) {
@@ -837,6 +850,116 @@ function normalizeWaveSpeedSize(value: unknown): string | undefined {
   return `${Math.round(width)}*${Math.round(height)}`;
 }
 
+function parseImageSize(value: unknown): { width: number; height: number } | null {
+  const match = String(value || "")
+    .trim()
+    .match(/^(\d+)[x*](\d+)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null;
+}
+
+function getClosestWaveSpeedAspectRatio(
+  width: number,
+  height: number,
+  allowedRatios = ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+): string | undefined {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return undefined;
+  }
+
+  const target = width / height;
+  let closest = "";
+  let closestDelta = Number.POSITIVE_INFINITY;
+  for (const ratio of allowedRatios) {
+    const [ratioWidth, ratioHeight] = ratio.split(":").map(Number);
+    if (!ratioWidth || !ratioHeight) {
+      continue;
+    }
+    const delta = Math.abs(target - ratioWidth / ratioHeight);
+    if (delta < closestDelta) {
+      closest = ratio;
+      closestDelta = delta;
+    }
+  }
+
+  return closestDelta <= 0.03 ? closest : undefined;
+}
+
+function getWaveSpeedAspectRatioFromSize(
+  value: unknown,
+  allowedRatios?: string[],
+): string | undefined {
+  const parsed = parseImageSize(value);
+  return parsed ? getClosestWaveSpeedAspectRatio(parsed.width, parsed.height, allowedRatios) : undefined;
+}
+
+function getWaveSpeedResolutionFromSize(value: unknown, fallback = "1k"): string {
+  const parsed = parseImageSize(value);
+  if (!parsed) {
+    return fallback;
+  }
+
+  const maxDimension = Math.max(parsed.width, parsed.height);
+  if (maxDimension >= 3000) {
+    return "4k";
+  }
+  if (maxDimension > 1536) {
+    return "2k";
+  }
+  return "1k";
+}
+
+function normalizeWaveSpeedAspectRatio(
+  value: unknown,
+  allowedRatios = ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
+): string | undefined {
+  const aspectRatio = String(value || "").trim();
+  if (!aspectRatio || aspectRatio === "auto") {
+    return undefined;
+  }
+
+  return allowedRatios.includes(aspectRatio) ? aspectRatio : undefined;
+}
+
+function normalizeWaveSpeedResolution(
+  value: unknown,
+  fallback = "1k",
+  allowedResolutions = ["1k", "2k", "4k"],
+): string {
+  const resolution = String(value || "")
+    .trim()
+    .toLowerCase();
+  return allowedResolutions.includes(resolution) ? resolution : fallback;
+}
+
+function normalizeWaveSpeedQuality(value: unknown): string {
+  const quality = String(value || "").trim().toLowerCase();
+  return ["low", "medium", "high"].includes(quality) ? quality : "medium";
+}
+
+function normalizeWaveSpeedOutputFormat(
+  value: unknown,
+  fallback = "png",
+  allowedFormats = ["png", "jpeg", "webp"],
+): string {
+  const outputFormat = String(value || "").trim().toLowerCase();
+  return allowedFormats.includes(outputFormat) ? outputFormat : fallback;
+}
+
+function normalizeWaveSpeedBackground(value: unknown): string {
+  const background = String(value || "").trim().toLowerCase();
+  return ["auto", "transparent", "opaque"].includes(background) ? background : "opaque";
+}
+
+function normalizeWaveSpeedGptImage15Size(value: unknown): string {
+  return normalizeWaveSpeedSize(value) || "auto";
+}
+
 function fitWaveSpeedDimensionSize(width: number, height: number): string {
   const maxDimension = 1536;
   const minDimension = 256;
@@ -940,7 +1063,7 @@ function extractGeneratedImages(payload: Record<string, unknown>, model: ImageMo
     }
   }
 
-  if (model === "qwen-image-edit-multiple-angles") {
+  if (isWaveSpeedImageModel(model)) {
     const roots = [
       payload,
       payload.data as Record<string, unknown> | undefined,
@@ -1072,7 +1195,8 @@ export async function optimizeImagePrompt(
 export async function generateImageDirect(args: GenerateImageArgs): Promise<GenerateImageResult> {
   const { apiBaseUrl, apiKey, config, model, prompt, sourceImages } = args;
   const effectiveApiKey = model === "codex-image-2" ? resolveCodexImageApiKey(apiKey) : apiKey;
-  if (model !== "qwen-image-edit-multiple-angles") {
+  const usesWaveSpeed = isWaveSpeedImageModel(model);
+  if (!usesWaveSpeed) {
     ensureApiKey(effectiveApiKey);
   }
 
@@ -1098,29 +1222,49 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
         2,
         mapViewRotationZoomToWaveSpeedDistance(config.viewRotationZoom),
       ),
-      output_format: String(config.outputFormat || "jpeg"),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "jpeg", ["jpeg", "png", "webp"]),
       enable_base64_output: false,
       enable_sync_mode: true,
       ...(size ? { size } : {}),
       ...(Number.isFinite(seed) && seed >= 0 ? { seed } : {}),
     };
   } else if (model === "gpt-image-1.5") {
-    const count = normalizeImageCount(config.n);
-    const size = String(config.size || "auto");
+    const aspectRatio =
+      normalizeWaveSpeedAspectRatio(config.aspectRatio) ||
+      getWaveSpeedAspectRatioFromSize(config.size, [
+        "1:1",
+        "1:2",
+        "2:1",
+        "1:3",
+        "3:1",
+        "2:3",
+        "3:2",
+        "3:4",
+        "4:3",
+        "4:5",
+        "5:4",
+        "9:16",
+        "16:9",
+        "9:21",
+        "21:9",
+      ]);
+    endpoint = buildApiUrl(
+      WAVESPEED_API_BASE_URL,
+      sourceImages.length > 0 ? "/openai/gpt-image-2/edit" : "/openai/gpt-image-2/text-to-image",
+    );
     body = {
-      model: "gpt-image-2",
       prompt,
-      size,
-      quality: "high",
-      n: count,
-      background: "auto",
-      moderation: "low",
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 10) } : {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      resolution: normalizeWaveSpeedResolution(
+        config.resolution || getWaveSpeedResolutionFromSize(config.size),
+        "1k",
+      ),
+      quality: normalizeWaveSpeedQuality(config.quality),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "png"),
+      enable_sync_mode: false,
+      enable_base64_output: false,
     };
-
-    if (sourceImages.length > 0) {
-      endpoint = buildApiUrl(apiBaseUrl, "/v1/images/edits");
-      body.images = sourceImages;
-    }
   } else if (model === "codex-image-2") {
     const count = normalizeImageCount(config.n);
     body = {
@@ -1135,73 +1279,109 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
       endpoint = buildCodexImageApiUrl(apiBaseUrl, "/images/edits");
     }
   } else if (model === "gpt-image-1.5-official") {
+    endpoint = buildApiUrl(
+      WAVESPEED_API_BASE_URL,
+      sourceImages.length > 0 ? "/openai/gpt-image-1.5/edit" : "/openai/gpt-image-1.5/text-to-image",
+    );
     body = {
-      model: "gpt-image-1.5",
       prompt,
-      size: String(config.size || "1024x1024"),
-      quality: "auto",
-      n: 1,
-      background: String(config.transparency || "auto"),
-      moderation: "auto",
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 10), input_fidelity: "high" } : {}),
+      size: normalizeWaveSpeedGptImage15Size(config.size),
+      quality: normalizeWaveSpeedQuality(config.quality),
+      background: normalizeWaveSpeedBackground(config.transparency),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "jpeg", ["jpeg", "png"]),
+      enable_sync_mode: false,
+      enable_base64_output: false,
     };
-
-    if (sourceImages.length > 0) {
-      endpoint = buildApiUrl(apiBaseUrl, "/v1/images/edits");
-      body.images = sourceImages;
-    }
-  } else if (model === "gemini-3-pro-image-preview") {
-    endpoint = `${buildApiUrl(
-      apiBaseUrl,
-      "/v1beta/models/gemini-3-pro-image-preview:generateContent",
-    )}?key=${encodeURIComponent(apiKey)}`;
-
-    let effectivePrompt = prompt;
-    if (config.aspectRatio && config.aspectRatio !== "auto") {
-      effectivePrompt = `${effectivePrompt}, aspect ratio ${config.aspectRatio}`;
-    }
-    if (config.imageSize && config.imageSize !== "auto") {
-      effectivePrompt = `${effectivePrompt}, ${config.imageSize} resolution`;
-    }
-
+  } else if (model === "nano-banana-2") {
+    const aspectRatio = normalizeWaveSpeedAspectRatio(config.aspectRatio, [
+      "1:1",
+      "3:2",
+      "2:3",
+      "3:4",
+      "4:3",
+      "4:5",
+      "5:4",
+      "9:16",
+      "16:9",
+      "21:9",
+      "1:4",
+      "4:1",
+      "1:8",
+      "8:1",
+    ]);
+    endpoint = buildApiUrl(
+      WAVESPEED_API_BASE_URL,
+      sourceImages.length > 0 ? "/google/nano-banana-2/edit" : "/google/nano-banana-2/text-to-image",
+    );
     body = {
-      contents: [
-        {
-          role: "user",
-          parts: buildGeminiParts(effectivePrompt, sourceImages),
-        },
-      ],
-      generationConfig: {
-        responseModalities: ["IMAGE"],
-        imageConfig:
-          config.aspectRatio !== "auto" || config.imageSize !== "auto"
-            ? {
-                ...(config.aspectRatio !== "auto" ? { aspectRatio: config.aspectRatio } : {}),
-                ...(config.imageSize !== "auto" ? { imageSize: config.imageSize } : {}),
-              }
-            : undefined,
-      },
+      prompt,
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 14) } : {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      resolution: normalizeWaveSpeedResolution(config.imageSize || config.resolution, "1k", [
+        "0.5k",
+        "1k",
+        "2k",
+        "4k",
+      ]),
+      enable_web_search: false,
+      enable_image_search: false,
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "png", ["png", "jpeg"]),
+      enable_sync_mode: false,
+      enable_base64_output: false,
+    };
+  } else if (model === "gemini-3-pro-image-preview") {
+    const aspectRatio = normalizeWaveSpeedAspectRatio(config.aspectRatio);
+    endpoint = buildApiUrl(
+      WAVESPEED_API_BASE_URL,
+      sourceImages.length > 0 ? "/google/nano-banana-pro/edit" : "/google/nano-banana-pro/text-to-image",
+    );
+    body = {
+      prompt,
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 14) } : {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      resolution: normalizeWaveSpeedResolution(config.imageSize || config.resolution, "1k"),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "png", ["png", "jpeg"]),
+      enable_sync_mode: false,
+      enable_base64_output: false,
+    };
+  } else if (model === "seedream-4.5") {
+    endpoint = buildApiUrl(
+      WAVESPEED_API_BASE_URL,
+      sourceImages.length > 0 ? "/bytedance/seedream-v4.5/edit" : "/bytedance/seedream-v4.5",
+    );
+    body = {
+      prompt,
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 10) } : {}),
+      ...(normalizeWaveSpeedSize(config.size) ? { size: normalizeWaveSpeedSize(config.size) } : {}),
+      enable_sync_mode: false,
+      enable_base64_output: false,
+    };
+  } else if (model === "wan-2.7") {
+    const seed = Number(config.seed);
+    endpoint = buildApiUrl(
+      WAVESPEED_API_BASE_URL,
+      sourceImages.length > 0 ? "/alibaba/wan-2.7/image-edit" : "/alibaba/wan-2.7/text-to-image",
+    );
+    body = {
+      prompt,
+      ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 9) } : {}),
+      ...(normalizeWaveSpeedSize(config.size) ? { size: normalizeWaveSpeedSize(config.size) } : {}),
+      ...(sourceImages.length === 0 ? { thinking_mode: config.thinkingMode !== false } : {}),
+      ...(Number.isFinite(seed) ? { seed: Math.floor(seed) } : {}),
     };
   }
 
   const requestImagePayload = async (requestBody: Record<string, unknown>) => {
-    if (
-      (model === "gpt-image-1.5" || model === "codex-image-2" || model === "gpt-image-1.5-official") &&
-      sourceImages.length > 0
-    ) {
+    if (model === "codex-image-2" && sourceImages.length > 0) {
       const formData = new FormData();
       appendFormField(formData, "model", requestBody.model);
       appendFormField(formData, "prompt", requestBody.prompt);
       appendFormField(formData, "size", requestBody.size);
       appendFormField(formData, "n", requestBody.n || 1);
-      if (model !== "codex-image-2") {
-        appendFormField(formData, "quality", requestBody.quality);
-        appendFormField(formData, "background", requestBody.background || "auto");
-        appendFormField(formData, "moderation", requestBody.moderation || "auto");
-      }
 
       sourceImages.forEach((image, index) => {
-        const imageField = model === "codex-image-2" ? "image" : "image[]";
-        formData.append(imageField, dataUrlToBlob(image), `image-${index + 1}.${getDataUrlImageExtension(image)}`);
+        formData.append("image", dataUrlToBlob(image), `image-${index + 1}.${getDataUrlImageExtension(image)}`);
       });
 
       const requestInit: RequestInit = {
@@ -1219,7 +1399,7 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(model === "qwen-image-edit-multiple-angles" ? {} : { Authorization: `Bearer ${effectiveApiKey}` }),
+        ...(usesWaveSpeed ? {} : { Authorization: `Bearer ${effectiveApiKey}` }),
       },
       body: JSON.stringify(requestBody),
     };
@@ -1230,7 +1410,7 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
   const splitMultiImageRequest = model === "gpt-image-1.5" || model === "codex-image-2";
   const requestedCount = splitMultiImageRequest ? normalizeImageCount(config.n) : 1;
   const requestBodies = splitMultiImageRequest
-    ? Array.from({ length: requestedCount }, () => ({ ...body, n: 1 }))
+    ? Array.from({ length: requestedCount }, () => (model === "codex-image-2" ? { ...body, n: 1 } : { ...body }))
     : [body];
   const payloadResults = await Promise.allSettled(
     requestBodies.map((requestBody) => requestImagePayload(requestBody)),
@@ -1243,12 +1423,11 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
   )?.reason;
   let images = payloads.flatMap((payload) => extractGeneratedImages(payload, model));
 
-  if (model === "qwen-image-edit-multiple-angles" && images.length === 0 && payloads[0]) {
-    const predictionId = getWaveSpeedPredictionId(payloads[0]);
-    if (predictionId) {
-      const payload = await pollWaveSpeedPrediction(predictionId);
-      payloads = [payload];
-      images = extractGeneratedImages(payload, model);
+  if (usesWaveSpeed && images.length === 0 && payloads.length > 0) {
+    const predictionIds = payloads.map((payload) => getWaveSpeedPredictionId(payload)).filter(Boolean);
+    if (predictionIds.length > 0) {
+      payloads = await Promise.all(predictionIds.map((predictionId) => pollWaveSpeedPrediction(predictionId)));
+      images = payloads.flatMap((payload) => extractGeneratedImages(payload, model));
     }
   }
 
@@ -1330,7 +1509,7 @@ function resolveServerImageApiBaseUrl(model: ImageModelId, apiBaseUrl: string): 
     return normalizeCodexImageApiBaseUrl(apiBaseUrl);
   }
 
-  if (model === "qwen-image-edit-multiple-angles") {
+  if (isWaveSpeedImageModel(model)) {
     return "";
   }
 
@@ -1374,7 +1553,8 @@ export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): Image
 export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobStatus> {
   const { apiBaseUrl, apiKey, clientRequestId, config, model, prompt, promptMetadata, requestFingerprint, sourceImages } = args;
   const effectiveApiKey = model === "codex-image-2" ? resolveCodexImageApiKey(apiKey) : apiKey;
-  if (model !== "qwen-image-edit-multiple-angles") {
+  const usesWaveSpeed = isWaveSpeedImageModel(model);
+  if (!usesWaveSpeed) {
     ensureApiKey(effectiveApiKey);
   }
 
@@ -1391,7 +1571,7 @@ export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobS
       sourceImages,
       config,
       apiBaseUrl: resolveServerImageApiBaseUrl(model, apiBaseUrl),
-      apiKey: model === "qwen-image-edit-multiple-angles" ? "" : effectiveApiKey,
+      apiKey: usesWaveSpeed ? "" : effectiveApiKey,
     }),
   });
 }

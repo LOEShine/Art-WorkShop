@@ -6,6 +6,9 @@ export type ImageModelId =
   | "codex-image-2"
   | "gpt-image-1.5-official"
   | "gemini-3-pro-image-preview"
+  | "nano-banana-2"
+  | "seedream-4.5"
+  | "wan-2.7"
   | "qwen-image-edit-multiple-angles";
 
 export type VideoModelId = "veo3" | "hailuo" | "seedance" | "sora";

@@ -32,11 +32,14 @@ import {
 } from "lucide-vue-next";
 
 import OpenAiIcon from "@/components/icons/OpenAiIcon.vue";
+import GoogleIcon from "@/components/icons/GoogleIcon.vue";
 import InfiniteCanvas from "@/components/InfiniteCanvas.vue";
 import LoadingLottie from "@/components/LoadingLottie.vue";
 import MediaModal from "@/components/MediaModal.vue";
 import MultiAngleThreePreview from "@/components/MultiAngleThreePreview.vue";
+import SeedreamIcon from "@/components/icons/SeedreamIcon.vue";
 import SettingsModal from "@/components/SettingsModal.vue";
+import WanIcon from "@/components/icons/WanIcon.vue";
 import {
   createDefaultImageConfigs,
   IMAGE_MODELS,
@@ -65,6 +68,7 @@ import {
   generateImage,
   imageJobToTask,
   isErrorStatus,
+  isWaveSpeedImageModel,
   listImageJobs,
   optimizeImagePrompt,
   pollImageJob,
@@ -225,8 +229,14 @@ const cameraWheelScrollTargets: Partial<Record<keyof CameraParameterSelection, n
 const videoIconSrcCache = new Map<string, string>();
 
 function getImageModelIcon(modelId: string) {
-  if (modelId === "gemini-3-pro-image-preview") {
-    return null;
+  if (modelId === "gemini-3-pro-image-preview" || modelId === "nano-banana-2") {
+    return GoogleIcon;
+  }
+  if (modelId === "seedream-4.5") {
+    return SeedreamIcon;
+  }
+  if (modelId === "wan-2.7") {
+    return WanIcon;
   }
 
   return OpenAiIcon;
@@ -2700,14 +2710,15 @@ async function handleGenerateImage() {
   const sourceImages = buildEffectiveSourceImages();
   const promptMetadata = buildImagePromptMetadata(generationModel, generationPrompt, sourceImages.length);
   const usesCodexImageKey = generationModel === "codex-image-2";
+  const usesWaveSpeedImageModel = isWaveSpeedImageModel(generationModel);
   const apiBaseUrl =
-    generationModel === "qwen-image-edit-multiple-angles"
+    usesWaveSpeedImageModel
       ? ""
       : usesCodexImageKey
         ? CODEX_IMAGE_API_BASE_URL
         : store.apiBaseUrl;
   const apiKey =
-    generationModel === "qwen-image-edit-multiple-angles"
+    usesWaveSpeedImageModel
       ? ""
       : usesCodexImageKey
         ? store.codexApiKey

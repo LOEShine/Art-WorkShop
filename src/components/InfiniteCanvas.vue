@@ -33,6 +33,10 @@ import {
   ZoomOut,
 } from "lucide-vue-next";
 
+import GoogleIcon from "@/components/icons/GoogleIcon.vue";
+import OpenAiIcon from "@/components/icons/OpenAiIcon.vue";
+import SeedreamIcon from "@/components/icons/SeedreamIcon.vue";
+import WanIcon from "@/components/icons/WanIcon.vue";
 import {
   createDefaultImageConfigs,
   DEFAULT_IMAGE_MODEL_ID,
@@ -45,6 +49,7 @@ import {
   createImageRequestFingerprint,
   generateImage,
   imageJobToTask,
+  isWaveSpeedImageModel,
   listImageJobs,
   pollImageJob,
   type ImageJobStatus,
@@ -278,6 +283,20 @@ const activeModelLabel = computed(() => activeImageModel.value.name);
 const activeAssetCategoryLabel = computed(
   () => assetCategories.value.find((category) => category.id === activeAssetCategoryId.value)?.name ?? "资产库",
 );
+
+function getImageModelIcon(modelId: string) {
+  if (modelId === "gemini-3-pro-image-preview" || modelId === "nano-banana-2") {
+    return GoogleIcon;
+  }
+  if (modelId === "seedream-4.5") {
+    return SeedreamIcon;
+  }
+  if (modelId === "wan-2.7") {
+    return WanIcon;
+  }
+
+  return OpenAiIcon;
+}
 
 function createId(prefix: string) {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -1437,8 +1456,9 @@ async function runPromptNode(node: CanvasNode) {
     const sourceImages = await buildSourceImages(node);
     const generationPrompt = cleanPromptForGeneration(prompt);
     const usesCodexImageKey = model === "codex-image-2";
-    const apiBaseUrl = usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl;
-    const apiKey = usesCodexImageKey ? store.codexApiKey : store.apiKey;
+    const usesWaveSpeedImageModel = isWaveSpeedImageModel(model);
+    const apiBaseUrl = usesWaveSpeedImageModel ? "" : usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl;
+    const apiKey = usesWaveSpeedImageModel ? "" : usesCodexImageKey ? store.codexApiKey : store.apiKey;
     const requestFingerprint = await createImageRequestFingerprint({
       model,
       prompt: generationPrompt,
@@ -1826,7 +1846,13 @@ watch(viewport, scheduleSave, { deep: true });
             :aria-selected="model.id === activeImageModelId"
             @click="setImageModel(model.id)"
           >
-            <span>{{ model.name }}</span>
+            <span class="canvas-model-option-label">
+              <component
+                :is="getImageModelIcon(model.id)"
+                class="h-3.5 w-3.5 shrink-0"
+              />
+              <span>{{ model.name }}</span>
+            </span>
             <Check
               v-if="model.id === activeImageModelId"
               class="h-3.5 w-3.5"
@@ -2810,6 +2836,13 @@ watch(viewport, scheduleSave, { deep: true });
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.canvas-model-option-label {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .canvas-status {
