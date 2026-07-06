@@ -137,7 +137,7 @@ interface VideoUploadSlot extends UploadPreviewItem {
 const store = useAppStore();
 const defaultImageConfigs = createDefaultImageConfigs();
 const defaultVideoConfigs = createDefaultVideoConfigs();
-const HIDDEN_IMAGE_MODEL_IDS = new Set<ImageModelId>(["qwen-image-edit-multiple-angles"]);
+const HIDDEN_IMAGE_MODEL_IDS = new Set<ImageModelId>();
 const CAMERA_PARAMETER_COLUMNS: CameraParameterColumn[] = [
   {
     key: "cameraType",
@@ -248,15 +248,14 @@ function getImageModelIcon(modelId: string) {
   if (modelId === "qwen-image-layered") {
     return Layers;
   }
+  if (modelId === "qwen-image-edit-multiple-angles") {
+    return Rotate3d;
+  }
 
   return OpenAiIcon;
 }
 
 function getImageModelDisplayName(modelId: ImageModelId) {
-  if (modelId === "qwen-image-edit-multiple-angles") {
-    return "多角度";
-  }
-
   return IMAGE_MODELS.find((model) => model.id === modelId)?.name || modelId;
 }
 
@@ -313,12 +312,23 @@ const currentImageConfig = computed(() => ({
   ...defaultImageConfigs[selectedVisibleImageModelId.value],
   ...store.imageModelConfigs[selectedVisibleImageModelId.value],
 }));
+const isSelectedRotationModel = computed(() => selectedVisibleImageModelId.value === "qwen-image-edit-multiple-angles");
 
 watch(
   () => store.selectedImageModel,
   (model) => {
     if (HIDDEN_IMAGE_MODEL_IDS.has(model)) {
       store.setSelectedImageModel(fallbackImageModel.value.id);
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  selectedVisibleImageModelId,
+  (model) => {
+    if (model === "qwen-image-edit-multiple-angles") {
+      clearCameraParameterState();
     }
   },
   { immediate: true },
@@ -405,6 +415,9 @@ const imageActionLabel = computed(() => {
   if (effectiveImageModelId.value === "qwen-image-layered") {
     return store.isGenerating ? "分层中..." : "开始分层";
   }
+  if (effectiveImageModelId.value === "qwen-image-edit-multiple-angles") {
+    return store.isGenerating ? "旋转中..." : "开始旋转";
+  }
   return store.isGenerating ? "生成中..." : "开始生成";
 });
 const imagePromptPlaceholder = computed(() => {
@@ -417,6 +430,11 @@ const imagePromptPlaceholder = computed(() => {
   if (effectiveImageModelId.value === "qwen-image-layered") {
     return "可选：描述画面内容，帮助模型更准确分层...";
   }
+  if (effectiveImageModelId.value === "qwen-image-edit-multiple-angles") {
+    return viewRotationReferenceImage.value
+      ? "点击下方视角转动设置旋转角度..."
+      : "请先上传参考图，再设置旋转角度...";
+  }
   return "输入提示词，生成图片...";
 });
 const currentImageErrorMessage = computed(() => {
@@ -426,9 +444,16 @@ const currentImageErrorMessage = computed(() => {
   }
   return message;
 });
+const imageGenerationPromptReady = computed(() => {
+  if (effectiveImageModelId.value === "qwen-image-edit-multiple-angles") {
+    return viewRotationEnabled.value;
+  }
+
+  return imageGenerationPromptOptional.value || buildEffectiveImagePrompt().length > 0;
+});
 const canGenerateImage = computed(
   () =>
-    (imageGenerationPromptOptional.value || buildEffectiveImagePrompt().length > 0) &&
+    imageGenerationPromptReady.value &&
     !submittingImage.value &&
     !isImageTaskBusy.value &&
     (!imageGenerationRequiresSource.value || buildEffectiveSourceImages().length > 0),
@@ -1738,6 +1763,9 @@ function getAspectPreviewSize(text: string) {
     if (normalized === "自动" || normalized === "默认" || lower === "auto" || lower === "adaptive" || lower === "default") {
       return { width: 12, height: 12 };
     }
+    if (/^\d+(?:\.\d+)?k$/.test(lower)) {
+      return { width: 18, height: 12 };
+    }
     return null;
   }
 
@@ -1788,6 +1816,13 @@ function updatePrompt(prompt: string) {
   window.requestAnimationFrame(ensureTextareaHeight);
 }
 
+function selectImageModel(model: ImageModelId) {
+  store.setSelectedImageModel(model);
+  if (model === "qwen-image-edit-multiple-angles") {
+    clearCameraParameterState();
+  }
+}
+
 function handlePromptKeydown(event: KeyboardEvent) {
   if (!hasPromptSystemTokens.value || (event.key !== "Backspace" && event.key !== "Delete")) {
     return;
@@ -1806,6 +1841,16 @@ function handlePromptKeydown(event: KeyboardEvent) {
     }
     removeCameraParameters();
   }
+}
+
+function clearCameraParameterState() {
+  cameraParametersEnabled.value = false;
+  cameraParameterReferenceEnabled.value = false;
+  cameraParametersOpen.value = false;
+  cameraSummaryOpen.value = false;
+  cameraParameterReferenceOpen.value = false;
+  cameraParameterReferencePinned.value = false;
+  updatePromptSystemInlineOffset();
 }
 
 function removeCameraParameters() {
@@ -2108,7 +2153,6 @@ function buildGenerationImageConfig(model: ImageModelId) {
   }
 
   return {
-    ...baseConfig,
     horizontalAngle: viewRotation.value.rotation,
     verticalAngle: viewRotation.value.tilt,
     viewRotationZoom: viewRotation.value.zoom,
@@ -3246,7 +3290,7 @@ onBeforeUnmount(() => {
                     type="button"
                     class="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors"
                     :class="selectedVisibleImageModelId === model.id ? 'bg-primary text-primary-foreground' : 'hover:bg-accent hover:text-accent-foreground'"
-                    @click="store.setSelectedImageModel(model.id)"
+                    @click="selectImageModel(model.id)"
                   >
                     <component
                       :is="getImageModelIcon(model.id)"
@@ -3605,6 +3649,7 @@ onBeforeUnmount(() => {
                     <div class="prompt-tools-row px-3 pb-3 pt-1">
                       <div class="prompt-tools-group">
                         <button
+                          v-if="!isSelectedRotationModel"
                           type="button"
                           class="prompt-tool-button"
                           :class="optimizingPrompt ? 'prompt-tool-button--active' : ''"
@@ -3615,6 +3660,7 @@ onBeforeUnmount(() => {
                           <span>{{ optimizingPrompt ? "优化中" : store.prompt.trim() ? "提示词优化" : "随机提示词" }}</span>
                         </button>
                         <button
+                          v-if="!isSelectedRotationModel"
                           type="button"
                           class="prompt-tool-button"
                           :class="cameraParametersEnabled ? 'prompt-tool-button--selected' : ''"
@@ -4534,7 +4580,7 @@ onBeforeUnmount(() => {
         @click.stop
       >
         <div class="view-rotation-header">
-          <h3 class="text-sm font-semibold text-foreground">多角度</h3>
+          <h3 class="text-sm font-semibold text-foreground">旋转角度</h3>
           <button
             type="button"
             class="view-rotation-reset"

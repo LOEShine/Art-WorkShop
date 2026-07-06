@@ -1306,7 +1306,7 @@ async function generateImages(payload) {
 
   if (model === "qwen-image-edit-multiple-angles") {
     if (sourceImages.length === 0) {
-      throw new Error("多角度生成需要先上传参考图片");
+      throw new Error("旋转角度需要先上传参考图片");
     }
 
     const size = resolveWaveSpeedSize(config, sourceImages);
@@ -1908,7 +1908,7 @@ function isAutoRetryableGenerationError(error) {
 
   if (
     /缺少 API Key|服务端缺少 WAVESPEED_API_KEY|图片数据格式无效|参考图.*不存在|参考图路径无效|不支持的图像模型/i.test(message) ||
-    /多角度生成需要先上传参考图片|需要先上传参考图片|缺少模型|缺少提示词|请求体过大|JSON 请求体无效/i.test(message) ||
+    /旋转角度需要先上传参考图片|多角度生成需要先上传参考图片|需要先上传参考图片|缺少模型|缺少提示词|请求体过大|JSON 请求体无效/i.test(message) ||
     /invalid.?api.?key|api.?key.*invalid|unauthori[sz]ed|forbidden|permission denied|HTTP 401|HTTP 403/i.test(message) ||
     /HTTP 400|HTTP 404|HTTP 422/i.test(message) ||
     /余额|额度|欠费|充值|insufficient|balance|billing|payment|quota|credit/i.test(message) ||

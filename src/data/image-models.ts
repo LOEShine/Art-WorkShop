@@ -308,7 +308,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   },
   {
     id: "ultimate-image-upscaler",
-    name: "Ultimate Upscale",
+    name: "图像放大",
     description: "WaveSpeed Ultimate Image Upscaler",
     options: [
       {
@@ -337,7 +337,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   },
   {
     id: "qwen-image-layered",
-    name: "Qwen Layered",
+    name: "图像分层",
     description: "WaveSpeed Qwen Image Layered RGBA 分层",
     options: [
       {
@@ -357,42 +357,9 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   },
   {
     id: "qwen-image-edit-multiple-angles",
-    name: "多角度",
-    description: "WaveSpeed 多角度图像编辑模型",
-    options: [
-      {
-        key: "size",
-        label: "分辨率",
-        default: "auto",
-        preview: true,
-        options: [
-          { value: "auto", label: "跟随参考图" },
-          { value: "1024x1024", label: "1024×1024" },
-          { value: "1024x1536", label: "1024×1536" },
-          { value: "1536x1024", label: "1536×1024" },
-        ],
-      },
-      {
-        key: "outputFormat",
-        label: "输出格式",
-        default: "jpeg",
-        compact: true,
-        options: [
-          { value: "jpeg", label: "JPEG" },
-          { value: "png", label: "PNG" },
-          { value: "webp", label: "WebP" },
-        ],
-      },
-      {
-        key: "seed",
-        label: "种子",
-        default: -1,
-        options: [
-          { value: -1, label: "随机" },
-          { value: 42, label: "固定 42" },
-        ],
-      },
-    ],
+    name: "旋转角度",
+    description: "WaveSpeed Qwen 旋转角度图像编辑模型",
+    options: [],
   },
 ];
 
