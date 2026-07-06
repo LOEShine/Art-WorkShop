@@ -3093,6 +3093,13 @@ function handlePreviewDownload() {
   }
 }
 
+function handlePreviewDownloadAll() {
+  if (previewKind.value !== "image" || previewItems.value.length === 0) {
+    return;
+  }
+  downloadImageSet(previewItems.value);
+}
+
 function loadGalleryItemConfig(item: GalleryHistoryItem) {
   if (item.kind === "image") {
     store.loadTaskConfig(item);
@@ -4687,11 +4694,13 @@ onBeforeUnmount(() => {
       :title="previewTitle"
       :show-continue="previewCanContinue"
       :show-download="previewKind !== 'prompt'"
+      :show-download-all="previewKind === 'image' && previewItems.length > 1"
       :items="previewItems"
       :active-index="previewIndex"
       @close="closePreview"
       @continue="continueFromPreview"
       @download="handlePreviewDownload"
+      @download-all="handlePreviewDownloadAll"
       @previous="showPreviousPreviewImage"
       @next="showNextPreviewImage"
       @select="setPreviewIndex"

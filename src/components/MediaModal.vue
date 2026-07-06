@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ChevronLeft, ChevronRight, Download, Pencil, X } from "lucide-vue-next";
-import { onBeforeUnmount, onMounted } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 const props = defineProps<{
   open: boolean;
@@ -9,6 +9,7 @@ const props = defineProps<{
   title?: string;
   showContinue?: boolean;
   showDownload?: boolean;
+  showDownloadAll?: boolean;
   items?: string[];
   activeIndex?: number;
 }>();
@@ -17,10 +18,44 @@ const emit = defineEmits<{
   close: [];
   continue: [];
   download: [];
+  downloadAll: [];
   previous: [];
   next: [];
   select: [index: number];
 }>();
+
+const frameRef = ref<HTMLElement | null>(null);
+const mediaRef = ref<HTMLImageElement | HTMLVideoElement | null>(null);
+const mediaOverlayStyle = ref<Record<string, string>>({ inset: "0px" });
+
+function updateMediaOverlay() {
+  const frame = frameRef.value;
+  const media = mediaRef.value;
+  if (!frame || !media) {
+    mediaOverlayStyle.value = { inset: "0px" };
+    return;
+  }
+
+  const frameRect = frame.getBoundingClientRect();
+  const mediaRect = media.getBoundingClientRect();
+  if (!mediaRect.width || !mediaRect.height) {
+    mediaOverlayStyle.value = { inset: "0px" };
+    return;
+  }
+
+  mediaOverlayStyle.value = {
+    left: `${mediaRect.left - frameRect.left}px`,
+    top: `${mediaRect.top - frameRect.top}px`,
+    width: `${mediaRect.width}px`,
+    height: `${mediaRect.height}px`,
+  };
+}
+
+function scheduleMediaOverlayUpdate() {
+  void nextTick(() => {
+    window.requestAnimationFrame(updateMediaOverlay);
+  });
+}
 
 function handleKeyDown(event: KeyboardEvent) {
   if (event.key === "Escape" && props.open) {
@@ -30,11 +65,19 @@ function handleKeyDown(event: KeyboardEvent) {
 
 onMounted(() => {
   window.addEventListener("keydown", handleKeyDown);
+  window.addEventListener("resize", scheduleMediaOverlayUpdate);
+  scheduleMediaOverlayUpdate();
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleKeyDown);
+  window.removeEventListener("resize", scheduleMediaOverlayUpdate);
 });
+
+watch(
+  () => [props.open, props.src, props.kind] as const,
+  () => scheduleMediaOverlayUpdate(),
+);
 </script>
 
 <template>
@@ -44,73 +87,94 @@ onBeforeUnmount(() => {
     @click="emit('close')"
   >
     <div class="relative flex h-full max-h-[calc(100dvh-1.5rem)] w-full max-w-[calc(100vw-1.5rem)] flex-col items-center justify-center gap-3 sm:max-h-[calc(100dvh-2.5rem)] sm:max-w-[calc(100vw-2.5rem)]">
-      <div class="media-modal__frame relative flex flex-none items-center justify-center">
+      <div
+        ref="frameRef"
+        class="media-modal__frame relative flex flex-none items-center justify-center"
+      >
         <video
           v-if="kind === 'video'"
+          ref="mediaRef"
           :src="src"
           class="media-modal__media rounded-lg bg-black"
           controls
           playsinline
           preload="metadata"
+          @loadedmetadata="updateMediaOverlay"
           @click.stop
         />
         <img
           v-else
+          ref="mediaRef"
           :src="src"
           :alt="title || '预览'"
           class="media-modal__media rounded-lg"
+          @load="updateMediaOverlay"
           @click.stop
         />
 
-        <template v-if="kind !== 'video' && items && items.length > 1">
-          <button
-            type="button"
-            class="absolute left-2 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
-            @click.stop="emit('previous')"
-          >
-            <ChevronLeft class="h-5 w-5" />
-          </button>
-          <button
-            type="button"
-            class="absolute right-2 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
-            @click.stop="emit('next')"
-          >
-            <ChevronRight class="h-5 w-5" />
-          </button>
-        </template>
-
-        <div class="absolute right-2 top-2 flex gap-2">
-          <button
-            type="button"
-            class="inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
-            @click.stop="emit('close')"
-          >
-            <X class="h-5 w-5" />
-          </button>
-        </div>
-
         <div
-          v-if="showContinue || showDownload"
-          class="absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-wrap items-center justify-center gap-2"
+          class="media-modal__overlay pointer-events-none absolute"
+          :style="mediaOverlayStyle"
         >
-          <button
-            v-if="showContinue"
-            type="button"
-            class="inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-            @click.stop="emit('continue')"
+          <template v-if="kind !== 'video' && items && items.length > 1">
+            <button
+              type="button"
+              class="pointer-events-auto absolute left-2 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+              @click.stop="emit('previous')"
+            >
+              <ChevronLeft class="h-5 w-5" />
+            </button>
+            <button
+              type="button"
+              class="pointer-events-auto absolute right-2 top-1/2 inline-flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+              @click.stop="emit('next')"
+            >
+              <ChevronRight class="h-5 w-5" />
+            </button>
+          </template>
+
+          <div class="absolute right-2 top-2 flex gap-2">
+            <button
+              type="button"
+              class="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white transition-colors hover:bg-black/70"
+              @click.stop="emit('close')"
+            >
+              <X class="h-5 w-5" />
+            </button>
+          </div>
+
+          <div
+            v-if="showContinue || showDownload || showDownloadAll"
+            class="absolute bottom-4 left-1/2 flex -translate-x-1/2 flex-wrap items-center justify-center gap-2"
           >
-            <Pencil class="h-4 w-4" />
-            继续修改
-          </button>
-          <button
-            v-if="showDownload"
-            type="button"
-            class="inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
-            @click.stop="emit('download')"
-          >
-            <Download class="h-4 w-4" />
-            下载
-          </button>
+            <button
+              v-if="showContinue"
+              type="button"
+              class="pointer-events-auto inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+              @click.stop="emit('continue')"
+            >
+              <Pencil class="h-4 w-4" />
+              继续修改
+            </button>
+            <button
+              v-if="showDownload"
+              type="button"
+              class="pointer-events-auto inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+              @click.stop="emit('download')"
+            >
+              <Download class="h-4 w-4" />
+              下载
+            </button>
+            <button
+              v-if="showDownloadAll"
+              type="button"
+              class="pointer-events-auto inline-flex items-center justify-center gap-2 rounded-md bg-secondary px-4 py-2 text-sm text-secondary-foreground shadow-sm transition-colors hover:bg-secondary/80"
+              @click.stop="emit('downloadAll')"
+            >
+              <Download class="h-4 w-4" />
+              全部下载
+            </button>
+          </div>
         </div>
       </div>
 
@@ -158,6 +222,11 @@ onBeforeUnmount(() => {
   max-width: 80vw !important;
   object-fit: contain;
   width: auto !important;
+}
+
+.media-modal__overlay {
+  min-height: 0;
+  min-width: 0;
 }
 
 .media-modal__thumb--active {
