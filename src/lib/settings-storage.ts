@@ -4,6 +4,7 @@ const LEGACY_SETTINGS_STORAGE_KEY = "art-workshop-storage-v1";
 export interface PersistedSettings {
   apiBaseUrl: string;
   apiKey: string;
+  imageApiKey: string;
   codexApiKey: string;
 }
 
@@ -25,6 +26,7 @@ export function readPersistedSettings(): Partial<PersistedSettings> {
       ? {
           apiBaseUrl: legacyParsed.apiBaseUrl,
           apiKey: legacyParsed.apiKey,
+          imageApiKey: legacyParsed.imageApiKey,
           codexApiKey: legacyParsed.codexApiKey,
         }
       : {};

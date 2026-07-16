@@ -2803,7 +2803,7 @@ async function handleGenerateImage() {
         : store.apiBaseUrl;
   const apiKey =
     usesWaveSpeedImageModel
-      ? ""
+      ? store.imageApiKey
       : usesCodexImageKey
         ? store.codexApiKey
         : store.apiKey;

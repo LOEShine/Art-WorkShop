@@ -17,7 +17,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "gpt-image-1.5",
     name: "GPT Image 2.0",
-    description: "WaveSpeed OpenAI GPT Image 2",
+    description: "OpenAI GPT Image 2",
     options: [
       {
         key: "size",
@@ -101,7 +101,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "gpt-image-1.5-official",
     name: "GPT Image 1.5",
-    description: "WaveSpeed OpenAI GPT Image 1.5",
+    description: "OpenAI GPT Image 1.5",
     options: [
       {
         key: "size",
@@ -151,7 +151,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "nano-banana-2",
     name: "Nano Banana 2",
-    description: "WaveSpeed Google Nano Banana 2",
+    description: "Google Nano Banana 2",
     options: [
       {
         key: "aspectRatio",
@@ -202,7 +202,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "gemini-3-pro-image-preview",
     name: "Nano Banana Pro",
-    description: "WaveSpeed Google Nano Banana Pro",
+    description: "Google Nano Banana Pro",
     options: [
       {
         key: "aspectRatio",
@@ -249,7 +249,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "seedream-5.0-pro",
     name: "Seedream 5 Pro",
-    description: "WaveSpeed Bytedance Seedream 5.0 Pro",
+    description: "Bytedance Seedream 5.0 Pro",
     options: [
       {
         key: "aspectRatio",
@@ -300,7 +300,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "wan-2.7",
     name: "WAN 2.7",
-    description: "WaveSpeed Alibaba WAN 2.7",
+    description: "Alibaba WAN 2.7",
     options: [
       {
         key: "size",
@@ -340,7 +340,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "ultimate-image-upscaler",
     name: "图像放大",
-    description: "WaveSpeed Ultimate Image Upscaler",
+    description: "Ultimate Image Upscaler",
     options: [
       {
         key: "targetResolution",
@@ -369,7 +369,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "qwen-image-layered",
     name: "图像分层",
-    description: "WaveSpeed Qwen Image Layered RGBA 分层",
+    description: "Qwen Image Layered RGBA 分层",
     options: [
       {
         key: "numLayers",
@@ -389,7 +389,7 @@ export const IMAGE_MODELS: ImageModelDefinition[] = [
   {
     id: "qwen-image-edit-multiple-angles",
     name: "旋转角度",
-    description: "WaveSpeed Qwen 旋转角度图像编辑模型",
+    description: "Qwen 旋转角度图像编辑模型",
     options: [],
   },
 ];

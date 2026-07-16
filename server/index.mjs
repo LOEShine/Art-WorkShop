@@ -1169,8 +1169,7 @@ function getWaveSpeedPredictionId(payload) {
   return String(data.id || payload.id || "").trim();
 }
 
-async function pollWaveSpeedPrediction(id) {
-  const wavespeedApiKey = process.env.WAVESPEED_API_KEY || "";
+async function pollWaveSpeedPrediction(id, apiKey) {
   let lastPayload = {};
 
   for (let attempt = 0; attempt < 90; attempt += 1) {
@@ -1182,7 +1181,7 @@ async function pollWaveSpeedPrediction(id) {
         method: "GET",
         headers: {
           Accept: "application/json",
-          ...(wavespeedApiKey ? { Authorization: `Bearer ${wavespeedApiKey}` } : {}),
+          Authorization: `Bearer ${apiKey}`,
         },
       },
     );
@@ -1194,11 +1193,11 @@ async function pollWaveSpeedPrediction(id) {
       return payload;
     }
     if (status === "failed" || status === "error") {
-      throw new Error(extractErrorMessage(payload) || "WaveSpeed 生成失败");
+      throw new Error(extractErrorMessage(payload) || "生图失败");
     }
   }
 
-  throw new Error(extractErrorMessage(lastPayload) || "WaveSpeed 生成超时");
+  throw new Error(extractErrorMessage(lastPayload) || "生图超时");
 }
 
 function extractGeneratedImages(payload, model) {
@@ -1293,16 +1292,14 @@ async function generateImages(payload) {
   const apiKey =
     model === "codex-image-2"
       ? resolveCodexImageApiKey(payload.apiKey)
-      : usesWaveSpeed
-        ? String(process.env.WAVESPEED_API_KEY || "")
-        : String(payload.apiKey || "");
+      : String(payload.apiKey || "");
   const apiBaseUrl =
     model === "codex-image-2"
       ? CODEX_IMAGE_REMOTE_BASE_URL
       : String(payload.apiBaseUrl || "") || VECTOR_API_BASE_URL;
 
   if (!apiKey.trim()) {
-    throw new Error(usesWaveSpeed ? "服务端缺少 WAVESPEED_API_KEY" : "缺少 API Key");
+    throw new Error(usesWaveSpeed ? "请先填写生图API-KEY" : "缺少 API Key");
   }
 
   let endpoint = buildApiUrl(apiBaseUrl, "/v1/images/generations");
@@ -1567,7 +1564,7 @@ async function generateImages(payload) {
   if (usesWaveSpeed && images.length === 0 && payloads.length > 0) {
     const predictionIds = payloads.map((result) => getWaveSpeedPredictionId(result)).filter(Boolean);
     if (predictionIds.length > 0) {
-      payloads = await Promise.all(predictionIds.map((predictionId) => pollWaveSpeedPrediction(predictionId)));
+      payloads = await Promise.all(predictionIds.map((predictionId) => pollWaveSpeedPrediction(predictionId, apiKey)));
       images = payloads.flatMap((result) => extractGeneratedImages(result, model));
     }
   }
@@ -1929,7 +1926,7 @@ function isAutoRetryableGenerationError(error) {
   }
 
   if (
-    /缺少 API Key|服务端缺少 WAVESPEED_API_KEY|图片数据格式无效|参考图.*不存在|参考图路径无效|不支持的图像模型/i.test(message) ||
+    /缺少 API Key|请先填写生图API-KEY|图片数据格式无效|参考图.*不存在|参考图路径无效|不支持的图像模型/i.test(message) ||
     /旋转角度需要先上传参考图片|多角度生成需要先上传参考图片|需要先上传参考图片|缺少模型|缺少提示词|请求体过大|JSON 请求体无效/i.test(message) ||
     /invalid.?api.?key|api.?key.*invalid|unauthori[sz]ed|forbidden|permission denied|HTTP 401|HTTP 403/i.test(message) ||
     /HTTP 400|HTTP 404|HTTP 422/i.test(message) ||

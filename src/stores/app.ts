@@ -77,6 +77,7 @@ function migrateLegacySeedreamTask(task: ImageTask | null): ImageTask | null {
 interface PersistedState {
   apiBaseUrl: string;
   apiKey: string;
+  imageApiKey: string;
   codexApiKey: string;
   themeMode: ThemeMode;
   generationMode: GenerationMode;
@@ -96,6 +97,7 @@ function buildPersistedState(): PersistedState {
   return {
     apiBaseUrl: VECTOR_API_BASE_URL,
     apiKey: "",
+    imageApiKey: "",
     codexApiKey: "",
     themeMode: getPreferredThemeMode(),
     generationMode: "image",
@@ -150,6 +152,7 @@ function readPersistedState(): PersistedState {
       ...defaults,
       ...parsed,
       apiBaseUrl: VECTOR_API_BASE_URL,
+      imageApiKey: parsed.imageApiKey ?? defaults.imageApiKey ?? "",
       codexApiKey: parsed.codexApiKey ?? defaults.codexApiKey ?? "",
       themeMode: getPreferredThemeMode(),
       selectedImageModel:
@@ -170,6 +173,7 @@ export const useAppStore = defineStore("artWorkshop", {
     return {
       apiBaseUrl: persisted.apiBaseUrl,
       apiKey: persisted.apiKey,
+      imageApiKey: persisted.imageApiKey,
       codexApiKey: persisted.codexApiKey,
       themeMode: persisted.themeMode,
       generationMode: persisted.generationMode,
@@ -218,6 +222,7 @@ export const useAppStore = defineStore("artWorkshop", {
       writePersistedSettings({
         apiBaseUrl: this.apiBaseUrl,
         apiKey: this.apiKey,
+        imageApiKey: this.imageApiKey,
         codexApiKey: this.codexApiKey,
       });
 
@@ -239,6 +244,7 @@ export const useAppStore = defineStore("artWorkshop", {
       const payload: PersistedState = {
         apiBaseUrl: this.apiBaseUrl,
         apiKey: this.apiKey,
+        imageApiKey: this.imageApiKey,
         codexApiKey: this.codexApiKey,
         themeMode: getPreferredThemeMode(),
         generationMode: this.generationMode,
@@ -262,13 +268,15 @@ export const useAppStore = defineStore("artWorkshop", {
     toggleTheme() {
       this.setThemeMode(this.themeMode === "dark" ? "light" : "dark");
     },
-    setApiSettings(apiKey: string, codexApiKey: string) {
+    setApiSettings(imageApiKey: string, apiKey: string, codexApiKey: string) {
       this.apiBaseUrl = VECTOR_API_BASE_URL;
+      this.imageApiKey = imageApiKey.trim();
       this.apiKey = apiKey.trim();
       this.codexApiKey = codexApiKey.trim();
       writePersistedSettings({
         apiBaseUrl: this.apiBaseUrl,
         apiKey: this.apiKey,
+        imageApiKey: this.imageApiKey,
         codexApiKey: this.codexApiKey,
       });
       this.persist();

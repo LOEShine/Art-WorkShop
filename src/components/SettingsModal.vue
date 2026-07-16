@@ -20,7 +20,9 @@ const emit = defineEmits<{
 
 const store = useAppStore();
 
+const imageApiKey = ref(store.imageApiKey);
 const codexApiKey = ref(store.codexApiKey);
+const showImageApiKey = ref(false);
 const showCodexApiKey = ref(false);
 const testingTarget = ref<"codex" | null>(null);
 const saved = ref(false);
@@ -34,7 +36,9 @@ watch(
       return;
     }
 
+    imageApiKey.value = store.imageApiKey;
     codexApiKey.value = store.codexApiKey;
+    showImageApiKey.value = false;
     showCodexApiKey.value = false;
     saved.value = false;
     testingTarget.value = null;
@@ -44,7 +48,7 @@ watch(
 );
 
 function handleSave() {
-  store.setApiSettings(store.apiKey, codexApiKey.value);
+  store.setApiSettings(imageApiKey.value, store.apiKey, codexApiKey.value);
   saved.value = true;
   codexTestStatus.value = null;
   codexTestMessage.value = "";
@@ -107,6 +111,38 @@ async function testCodexKey() {
       </div>
 
       <div class="space-y-4">
+        <div class="space-y-2">
+          <label class="flex items-center gap-2 text-sm font-medium">
+            <Key class="h-4 w-4" />
+            生图API-KEY
+          </label>
+          <div class="relative">
+            <input
+              v-model="imageApiKey"
+              :type="showImageApiKey ? 'text' : 'password'"
+              class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 pr-10 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              placeholder="请输入生图 API-KEY"
+              autocomplete="off"
+            />
+            <button
+              type="button"
+              class="absolute right-0 top-0 inline-flex h-9 w-9 items-center justify-center rounded-md transition-colors hover:bg-accent"
+              aria-label="显示或隐藏生图 API-KEY"
+              @click="showImageApiKey = !showImageApiKey"
+            >
+              <EyeOff
+                v-if="showImageApiKey"
+                class="h-4 w-4"
+              />
+              <Eye
+                v-else
+                class="h-4 w-4"
+              />
+            </button>
+          </div>
+          <p class="text-xs text-muted-foreground">用于生图和图生图模型</p>
+        </div>
+
         <div class="space-y-2">
           <label class="flex items-center gap-2 text-sm font-medium">
             <Key class="h-4 w-4" />
@@ -194,8 +230,8 @@ async function testCodexKey() {
 
         <div class="border-t pt-4 text-xs text-muted-foreground">
           <p><strong>当前配置:</strong></p>
+          <p>• 生图API-KEY: 通用生图/图生图接口</p>
           <p>• CODEX KEY: Codex Image 2.0 生图/图生图接口</p>
-          <p>• WaveSpeed 图片模型使用服务端 WAVESPEED_API_KEY</p>
         </div>
       </div>
     </div>

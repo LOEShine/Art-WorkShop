@@ -1145,7 +1145,7 @@ function getWaveSpeedPredictionId(payload: Record<string, unknown>): string {
   return String(data?.id || payload.id || "").trim();
 }
 
-async function pollWaveSpeedPrediction(id: string): Promise<Record<string, unknown>> {
+async function pollWaveSpeedPrediction(id: string, apiKey: string): Promise<Record<string, unknown>> {
   let lastPayload: Record<string, unknown> = {};
 
   for (let attempt = 0; attempt < 90; attempt += 1) {
@@ -1155,6 +1155,7 @@ async function pollWaveSpeedPrediction(id: string): Promise<Record<string, unkno
       method: "GET",
       headers: {
         Accept: "application/json",
+        Authorization: `Bearer ${apiKey}`,
       },
     };
     const payload = await fetchJson<Record<string, unknown>>(
@@ -1169,11 +1170,11 @@ async function pollWaveSpeedPrediction(id: string): Promise<Record<string, unkno
       return payload;
     }
     if (status === "failed" || status === "error") {
-      throw new Error(extractErrorMessage(payload) || "WaveSpeed 生成失败");
+      throw new Error(extractErrorMessage(payload) || "生图失败");
     }
   }
 
-  throw new Error(extractErrorMessage(lastPayload) || "WaveSpeed 生成超时");
+  throw new Error(extractErrorMessage(lastPayload) || "生图超时");
 }
 
 export async function optimizeImagePrompt(
@@ -1231,9 +1232,10 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
   const { apiBaseUrl, apiKey, config, model, prompt, sourceImages } = args;
   const effectiveApiKey = model === "codex-image-2" ? resolveCodexImageApiKey(apiKey) : apiKey;
   const usesWaveSpeed = isWaveSpeedImageModel(model);
-  if (!usesWaveSpeed) {
-    ensureApiKey(effectiveApiKey);
+  if (usesWaveSpeed && !String(effectiveApiKey || "").trim()) {
+    throw new Error("请先在设置中填写生图API-KEY");
   }
+  ensureApiKey(effectiveApiKey);
 
   let endpoint = buildApiUrl(apiBaseUrl, "/v1/images/generations");
   let body: Record<string, unknown> = { model, prompt };
@@ -1483,7 +1485,7 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(usesWaveSpeed ? {} : { Authorization: `Bearer ${effectiveApiKey}` }),
+        Authorization: `Bearer ${effectiveApiKey}`,
       },
       body: JSON.stringify(requestBody),
     };
@@ -1510,7 +1512,9 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
   if (usesWaveSpeed && images.length === 0 && payloads.length > 0) {
     const predictionIds = payloads.map((payload) => getWaveSpeedPredictionId(payload)).filter(Boolean);
     if (predictionIds.length > 0) {
-      payloads = await Promise.all(predictionIds.map((predictionId) => pollWaveSpeedPrediction(predictionId)));
+      payloads = await Promise.all(
+        predictionIds.map((predictionId) => pollWaveSpeedPrediction(predictionId, effectiveApiKey)),
+      );
       images = payloads.flatMap((payload) => extractGeneratedImages(payload, model));
     }
   }
@@ -1638,9 +1642,10 @@ export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobS
   const { apiBaseUrl, apiKey, clientRequestId, config, model, prompt, promptMetadata, requestFingerprint, sourceImages } = args;
   const effectiveApiKey = model === "codex-image-2" ? resolveCodexImageApiKey(apiKey) : apiKey;
   const usesWaveSpeed = isWaveSpeedImageModel(model);
-  if (!usesWaveSpeed) {
-    ensureApiKey(effectiveApiKey);
+  if (usesWaveSpeed && !String(effectiveApiKey || "").trim()) {
+    throw new Error("请先在设置中填写生图API-KEY");
   }
+  ensureApiKey(effectiveApiKey);
 
   return fetchJsonWithNetworkError<ImageJobStatus>(buildApiUrl(IMAGE_JOB_API_BASE_URL, "/image-jobs"), {
     method: "POST",
@@ -1655,7 +1660,7 @@ export async function submitImageJob(args: GenerateImageArgs): Promise<ImageJobS
       sourceImages,
       config,
       apiBaseUrl: resolveServerImageApiBaseUrl(model, apiBaseUrl),
-      apiKey: usesWaveSpeed ? "" : effectiveApiKey,
+      apiKey: effectiveApiKey,
     }),
   });
 }

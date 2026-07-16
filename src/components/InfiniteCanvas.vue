@@ -1464,7 +1464,7 @@ async function runPromptNode(node: CanvasNode) {
     const usesCodexImageKey = model === "codex-image-2";
     const usesWaveSpeedImageModel = isWaveSpeedImageModel(model);
     const apiBaseUrl = usesWaveSpeedImageModel ? "" : usesCodexImageKey ? CODEX_IMAGE_API_BASE_URL : store.apiBaseUrl;
-    const apiKey = usesWaveSpeedImageModel ? "" : usesCodexImageKey ? store.codexApiKey : store.apiKey;
+    const apiKey = usesWaveSpeedImageModel ? store.imageApiKey : usesCodexImageKey ? store.codexApiKey : store.apiKey;
     const requestFingerprint = await createImageRequestFingerprint({
       model,
       prompt: generationPrompt,
