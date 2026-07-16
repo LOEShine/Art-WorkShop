@@ -1184,7 +1184,6 @@ async function pollWaveSpeedPrediction(id, apiKey) {
         },
       },
     );
-    lastPayload = payload;
     const data = payload.data || payload;
     const status = String(data.status || payload.status || "").toLowerCase();
 
