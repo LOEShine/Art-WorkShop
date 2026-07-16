@@ -183,6 +183,8 @@ export const CODEX_IMAGE_REMOTE_BASE_URL = "https://www.tokenbook.cc/v1";
 export const CODEX_IMAGE_API_BASE_URL = "/codex-image-api";
 export const WAVESPEED_API_BASE_URL = "/wavespeed-api";
 export const IMAGE_JOB_API_BASE_URL = "/api";
+const IMAGE_PREDICTION_TIMEOUT_MS = 10 * 60 * 1000;
+const IMAGE_PREDICTION_POLL_INTERVAL_MS = 1500;
 const CODEX_IMAGE_LEGACY_API_KEY = "sk-0427d5c8903aabdf3d0df00a85d33fbc6a8bce0811cc231b4dd54622c74f16fa";
 const CODEX_IMAGE_REPLACEMENT_API_KEY = "sk-09b7dd6f5f936a2576fabb314eb821d80be5daba9cebfa5a822ca9bc0bf3cfb7";
 const WAVESPEED_IMAGE_MODEL_IDS = new Set<ImageModelId>([
@@ -1147,9 +1149,10 @@ function getWaveSpeedPredictionId(payload: Record<string, unknown>): string {
 
 async function pollWaveSpeedPrediction(id: string, apiKey: string): Promise<Record<string, unknown>> {
   let lastPayload: Record<string, unknown> = {};
+  const startedAt = Date.now();
 
-  for (let attempt = 0; attempt < 90; attempt += 1) {
-    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  while (Date.now() - startedAt < IMAGE_PREDICTION_TIMEOUT_MS) {
+    await new Promise((resolve) => window.setTimeout(resolve, IMAGE_PREDICTION_POLL_INTERVAL_MS));
 
     const requestInit: RequestInit = {
       method: "GET",
