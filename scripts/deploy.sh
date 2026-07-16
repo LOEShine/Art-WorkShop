@@ -43,7 +43,6 @@ install_image_job_service() {
 ART_WORKSHOP_API_HOST=127.0.0.1
 ART_WORKSHOP_API_PORT=8787
 ART_WORKSHOP_STORAGE_DIR=/var/lib/art-workshop
-ART_WORKSHOP_IMAGE_PREDICTION_TIMEOUT_MS=600000
 ENV
     chmod 600 "$env_file"
   fi

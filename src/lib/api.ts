@@ -183,7 +183,6 @@ export const CODEX_IMAGE_REMOTE_BASE_URL = "https://www.tokenbook.cc/v1";
 export const CODEX_IMAGE_API_BASE_URL = "/codex-image-api";
 export const WAVESPEED_API_BASE_URL = "/wavespeed-api";
 export const IMAGE_JOB_API_BASE_URL = "/api";
-const IMAGE_PREDICTION_TIMEOUT_MS = 10 * 60 * 1000;
 const IMAGE_PREDICTION_POLL_INTERVAL_MS = 1500;
 const CODEX_IMAGE_LEGACY_API_KEY = "sk-0427d5c8903aabdf3d0df00a85d33fbc6a8bce0811cc231b4dd54622c74f16fa";
 const CODEX_IMAGE_REPLACEMENT_API_KEY = "sk-09b7dd6f5f936a2576fabb314eb821d80be5daba9cebfa5a822ca9bc0bf3cfb7";
@@ -1148,10 +1147,7 @@ function getWaveSpeedPredictionId(payload: Record<string, unknown>): string {
 }
 
 async function pollWaveSpeedPrediction(id: string, apiKey: string): Promise<Record<string, unknown>> {
-  let lastPayload: Record<string, unknown> = {};
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < IMAGE_PREDICTION_TIMEOUT_MS) {
+  while (true) {
     await new Promise((resolve) => window.setTimeout(resolve, IMAGE_PREDICTION_POLL_INTERVAL_MS));
 
     const requestInit: RequestInit = {
@@ -1165,19 +1161,16 @@ async function pollWaveSpeedPrediction(id: string, apiKey: string): Promise<Reco
       buildApiUrl(WAVESPEED_API_BASE_URL, `/predictions/${encodeURIComponent(id)}/result`),
       requestInit,
     );
-    lastPayload = payload;
     const data = (payload.data as Record<string, unknown> | undefined) || payload;
     const status = String(data.status || payload.status || "").toLowerCase();
 
     if (status === "completed" || status === "succeeded" || status === "success") {
       return payload;
     }
-    if (status === "failed" || status === "error") {
+    if (["failed", "error", "cancelled", "canceled"].includes(status)) {
       throw new Error(extractErrorMessage(payload) || "生图失败");
     }
   }
-
-  throw new Error(extractErrorMessage(lastPayload) || "生图超时");
 }
 
 export async function optimizeImagePrompt(
@@ -1727,13 +1720,11 @@ export async function listAdminImageJobs(query: AdminImageJobQuery): Promise<Adm
 export async function waitForImageJob(
   jobId: string,
   onJobUpdate?: (job: ImageJobStatus) => void,
-  timeoutMs = 30 * 60 * 1000,
 ): Promise<ImageJobStatus> {
-  const startedAt = Date.now();
   let pollDelay = 1600;
   let transientFailures = 0;
 
-  while (Date.now() - startedAt < timeoutMs) {
+  while (true) {
     await delay(pollDelay);
 
     try {
@@ -1761,8 +1752,6 @@ export async function waitForImageJob(
       pollDelay = Math.min(15000, 2000 + transientFailures * 2000);
     }
   }
-
-  throw new Error("图像生成任务仍在服务器运行，请稍后回到页面继续查看结果");
 }
 
 export async function generateImage(args: GenerateImageArgs): Promise<GenerateImageResult> {

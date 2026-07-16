@@ -47,13 +47,6 @@ const MAX_BODY_BYTES = Number(process.env.ART_WORKSHOP_MAX_BODY_BYTES || 96 * 10
 const MAX_CONCURRENT_JOBS = Math.max(1, Number(process.env.ART_WORKSHOP_IMAGE_JOB_CONCURRENCY || 2));
 const MAX_AUTO_RETRY_ATTEMPTS = Math.max(0, Number(process.env.ART_WORKSHOP_IMAGE_JOB_AUTO_RETRIES || 1));
 const AUTO_RETRY_DELAY_MS = Math.max(0, Number(process.env.ART_WORKSHOP_IMAGE_JOB_AUTO_RETRY_DELAY_MS || 1200));
-const MIN_IMAGE_PREDICTION_TIMEOUT_MS = 10 * 60 * 1000;
-const configuredImagePredictionTimeoutMs = Number(
-  process.env.ART_WORKSHOP_IMAGE_PREDICTION_TIMEOUT_MS || MIN_IMAGE_PREDICTION_TIMEOUT_MS,
-);
-const IMAGE_PREDICTION_TIMEOUT_MS = Number.isFinite(configuredImagePredictionTimeoutMs)
-  ? Math.max(MIN_IMAGE_PREDICTION_TIMEOUT_MS, configuredImagePredictionTimeoutMs)
-  : MIN_IMAGE_PREDICTION_TIMEOUT_MS;
 const IMAGE_PREDICTION_POLL_INTERVAL_MS = 1500;
 const REQUEST_FINGERPRINT_CACHE_TTL_MS = Number(
   process.env.ART_WORKSHOP_IMAGE_JOB_CACHE_TTL_MS || 15 * 60 * 1000,
@@ -1178,10 +1171,7 @@ function getWaveSpeedPredictionId(payload) {
 }
 
 async function pollWaveSpeedPrediction(id, apiKey) {
-  let lastPayload = {};
-  const startedAt = now();
-
-  while (now() - startedAt < IMAGE_PREDICTION_TIMEOUT_MS) {
+  while (true) {
     await sleep(IMAGE_PREDICTION_POLL_INTERVAL_MS);
 
     const payload = await fetchJson(
@@ -1201,12 +1191,10 @@ async function pollWaveSpeedPrediction(id, apiKey) {
     if (status === "completed" || status === "succeeded" || status === "success") {
       return payload;
     }
-    if (status === "failed" || status === "error") {
+    if (["failed", "error", "cancelled", "canceled"].includes(status)) {
       throw new Error(extractErrorMessage(payload) || "生图失败");
     }
   }
-
-  throw new Error(extractErrorMessage(lastPayload) || "生图超时");
 }
 
 function extractGeneratedImages(payload, model) {
