@@ -64,7 +64,7 @@ const WAVESPEED_IMAGE_MODEL_IDS = new Set([
   "gpt-image-1.5-official",
   "gemini-3-pro-image-preview",
   "nano-banana-2",
-  "seedream-4.5",
+  "seedream-5.0-pro",
   "wan-2.7",
   "ultimate-image-upscaler",
   "qwen-image-layered",
@@ -1442,16 +1442,34 @@ async function generateImages(payload) {
       enable_sync_mode: false,
       enable_base64_output: false,
     };
-  } else if (model === "seedream-4.5") {
-    const size = normalizeWaveSpeedSize(config.size);
+  } else if (model === "seedream-5.0-pro") {
+    const aspectRatio = normalizeWaveSpeedAspectRatio(config.aspectRatio, [
+      "1:1",
+      "1:2",
+      "2:1",
+      "1:3",
+      "3:1",
+      "2:3",
+      "3:2",
+      "3:4",
+      "4:3",
+      "4:5",
+      "5:4",
+      "9:16",
+      "16:9",
+      "9:21",
+      "21:9",
+    ]);
     endpoint = buildApiUrl(
       WAVESPEED_REMOTE_BASE_URL,
-      sourceImages.length > 0 ? "/bytedance/seedream-v4.5/edit" : "/bytedance/seedream-v4.5",
+      sourceImages.length > 0 ? "/bytedance/seedream-v5.0-pro/edit" : "/bytedance/seedream-v5.0-pro",
     );
     body = {
       prompt,
       ...(sourceImages.length > 0 ? { images: sourceImages.slice(0, 10) } : {}),
-      ...(size ? { size } : {}),
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      resolution: normalizeWaveSpeedResolution(config.resolution, "1k", ["1k", "2k"]),
+      output_format: normalizeWaveSpeedOutputFormat(config.outputFormat, "jpeg", ["jpeg", "png"]),
       enable_sync_mode: false,
       enable_base64_output: false,
     };

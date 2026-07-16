@@ -7,7 +7,7 @@ export type ImageModelId =
   | "gpt-image-1.5-official"
   | "gemini-3-pro-image-preview"
   | "nano-banana-2"
-  | "seedream-4.5"
+  | "seedream-5.0-pro"
   | "wan-2.7"
   | "ultimate-image-upscaler"
   | "qwen-image-layered"

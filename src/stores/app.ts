@@ -41,6 +41,38 @@ import type {
 
 const STORAGE_KEY = "art-workshop-storage-v1";
 const HISTORY_LIMIT = 20;
+const LEGACY_SEEDREAM_MODEL_ID = "seedream-4.5";
+const SEEDREAM_5_MODEL_ID: ImageModelId = "seedream-5.0-pro";
+
+const LEGACY_SEEDREAM_ASPECT_RATIOS: Record<string, string> = {
+  "2048x2048": "1:1",
+  "2560x1440": "16:9",
+  "2688x1792": "3:2",
+  "2688x2016": "4:3",
+  "4096x4096": "1:1",
+};
+
+function migrateLegacySeedreamConfig(config: ImageConfigRecord = {}): ImageConfigRecord {
+  const { size, ...currentConfig } = config;
+  return {
+    ...currentConfig,
+    aspectRatio: LEGACY_SEEDREAM_ASPECT_RATIOS[String(size || "")] || "auto",
+    resolution: "2k",
+    outputFormat: "jpeg",
+  };
+}
+
+function migrateLegacySeedreamTask(task: ImageTask | null): ImageTask | null {
+  if (!task || String(task.model) !== LEGACY_SEEDREAM_MODEL_ID) {
+    return task;
+  }
+
+  return {
+    ...task,
+    model: SEEDREAM_5_MODEL_ID,
+    modelConfig: migrateLegacySeedreamConfig(task.modelConfig),
+  };
+}
 
 interface PersistedState {
   apiBaseUrl: string;
@@ -88,10 +120,18 @@ function readPersistedState(): PersistedState {
     }
 
     const parsed = JSON.parse(raw) as Partial<PersistedState>;
+    const persistedImageModelConfigs = (parsed.imageModelConfigs || {}) as Record<string, ImageConfigRecord>;
     const imageModelConfigs = {
       ...defaults.imageModelConfigs,
-      ...(parsed.imageModelConfigs || {}),
+      ...persistedImageModelConfigs,
     };
+    if (persistedImageModelConfigs[LEGACY_SEEDREAM_MODEL_ID] && !persistedImageModelConfigs[SEEDREAM_5_MODEL_ID]) {
+      imageModelConfigs[SEEDREAM_5_MODEL_ID] = {
+        ...defaults.imageModelConfigs[SEEDREAM_5_MODEL_ID],
+        ...migrateLegacySeedreamConfig(persistedImageModelConfigs[LEGACY_SEEDREAM_MODEL_ID]),
+      };
+    }
+    delete (imageModelConfigs as Record<string, ImageConfigRecord>)[LEGACY_SEEDREAM_MODEL_ID];
 
     const videoConfigs = {
       ...defaults.videoConfigs,
@@ -112,6 +152,10 @@ function readPersistedState(): PersistedState {
       apiBaseUrl: VECTOR_API_BASE_URL,
       codexApiKey: parsed.codexApiKey ?? defaults.codexApiKey ?? "",
       themeMode: getPreferredThemeMode(),
+      selectedImageModel:
+        String(parsed.selectedImageModel || defaults.selectedImageModel) === LEGACY_SEEDREAM_MODEL_ID
+          ? SEEDREAM_5_MODEL_ID
+          : parsed.selectedImageModel || defaults.selectedImageModel,
       imageModelConfigs,
       videoConfigs,
     };
@@ -152,12 +196,13 @@ export const useAppStore = defineStore("artWorkshop", {
           loadCurrentImageTask(),
           loadCurrentVideoTask(),
         ]);
-        this.history = imageHistory;
+        this.history = imageHistory.map((task) => migrateLegacySeedreamTask(task) as ImageTask);
         this.videoHistory = videoHistory;
-        if (!this.currentTask && currentImageTask?.status === "generating") {
-          this.currentTask = currentImageTask;
+        const migratedCurrentImageTask = migrateLegacySeedreamTask(currentImageTask);
+        if (!this.currentTask && migratedCurrentImageTask?.status === "generating") {
+          this.currentTask = migratedCurrentImageTask;
           this.isGenerating = true;
-        } else if (currentImageTask) {
+        } else if (migratedCurrentImageTask) {
           await deleteCurrentImageTask();
         }
         if (!this.videoTask && currentVideoTask) {

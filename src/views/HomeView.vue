@@ -236,7 +236,7 @@ function getImageModelIcon(modelId: string) {
   if (modelId === "gemini-3-pro-image-preview" || modelId === "nano-banana-2") {
     return GoogleIcon;
   }
-  if (modelId === "seedream-4.5") {
+  if (modelId === "seedream-5.0-pro") {
     return SeedreamIcon;
   }
   if (modelId === "wan-2.7") {
