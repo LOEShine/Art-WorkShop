@@ -1,4 +1,11 @@
-import type { ImageModelConfigs, ImageModelDefinition, ImageModelId } from "@/types";
+import type {
+  ImageConfigRecord,
+  ImageModelConfigs,
+  ImageModelDefinition,
+  ImageModelField,
+  ImageModelId,
+  SelectOption,
+} from "@/types";
 
 export const IMAGE_UPLOAD_LIMITS: Record<ImageModelId, number> = {
   "gpt-image-1.5": 16,
@@ -413,6 +420,36 @@ export function isImageSourceRequiredModel(modelId: ImageModelId): boolean {
 
 export function isImagePromptOptionalModel(modelId: ImageModelId): boolean {
   return IMAGE_PROMPT_OPTIONAL_MODEL_IDS.has(modelId);
+}
+
+const IMAGE_RESOLUTION_KEYS = ["size", "imageSize", "resolution", "targetResolution"] as const;
+
+export function is4kImageConfig(config: ImageConfigRecord): boolean {
+  return IMAGE_RESOLUTION_KEYS.some((key) => {
+    const value = String(config[key] ?? "")
+      .trim()
+      .toLowerCase();
+    const resolutionMatch = value.match(/^(\d+(?:\.\d+)?)k$/);
+    if (resolutionMatch) {
+      return Number(resolutionMatch[1]) >= 4;
+    }
+
+    const dimensionsMatch = value.match(/^(\d+)\s*[x×*]\s*(\d+)$/i);
+    return dimensionsMatch
+      ? Math.max(Number(dimensionsMatch[1]), Number(dimensionsMatch[2])) >= 3840
+      : false;
+  });
+}
+
+export function getImageFieldOptions(
+  field: ImageModelField,
+  config: ImageConfigRecord,
+): SelectOption[] {
+  if (field.key !== "n" || !is4kImageConfig(config)) {
+    return field.options;
+  }
+
+  return field.options.filter((option) => Number(option.value) === 1);
 }
 
 export function createDefaultImageConfigs(): ImageModelConfigs {

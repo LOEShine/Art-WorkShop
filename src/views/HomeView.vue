@@ -44,6 +44,7 @@ import SettingsModal from "@/components/SettingsModal.vue";
 import WanIcon from "@/components/icons/WanIcon.vue";
 import {
   createDefaultImageConfigs,
+  getImageFieldOptions,
   IMAGE_MODELS,
   IMAGE_UPLOAD_LIMITS,
   isImagePromptOptionalModel,
@@ -3424,7 +3425,7 @@ onBeforeUnmount(() => {
                     class="image-option-grid image-option-grid--preview"
                   >
                     <button
-                      v-for="option in field.options"
+                      v-for="option in getImageFieldOptions(field, currentImageConfig)"
                       :key="String(option.value)"
                       type="button"
                       class="image-option-button image-option-button--preview"
@@ -3446,7 +3447,7 @@ onBeforeUnmount(() => {
                     class="image-option-grid image-option-grid--compact"
                   >
                     <button
-                      v-for="option in field.options"
+                      v-for="option in getImageFieldOptions(field, currentImageConfig)"
                       :key="String(option.value)"
                       type="button"
                       class="image-option-button image-option-button--compact"
@@ -3462,7 +3463,7 @@ onBeforeUnmount(() => {
                     class="image-option-grid image-option-grid--plain"
                   >
                     <button
-                      v-for="option in field.options"
+                      v-for="option in getImageFieldOptions(field, currentImageConfig)"
                       :key="String(option.value)"
                       type="button"
                       class="image-option-button image-option-button--plain"

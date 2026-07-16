@@ -707,6 +707,21 @@ function normalizeImageCount(value) {
   return Math.min(Math.max(Math.floor(count), 1), 10);
 }
 
+function is4kImageConfig(config) {
+  return ["size", "imageSize", "resolution", "targetResolution"].some((key) => {
+    const value = String(config?.[key] ?? "").trim().toLowerCase();
+    const resolutionMatch = value.match(/^(\d+(?:\.\d+)?)k$/);
+    if (resolutionMatch) {
+      return Number(resolutionMatch[1]) >= 4;
+    }
+
+    const dimensionsMatch = value.match(/^(\d+)\s*[x×*]\s*(\d+)$/i);
+    return dimensionsMatch
+      ? Math.max(Number(dimensionsMatch[1]), Number(dimensionsMatch[2])) >= 3840
+      : false;
+  });
+}
+
 function normalizeDegrees360(degrees) {
   const value = Number(degrees || 0);
   if (!Number.isFinite(value)) {
@@ -1360,7 +1375,7 @@ async function generateImages(payload) {
       model: "gpt-image-2",
       prompt,
       size: normalizeCodexImageSize(config.size),
-      n: normalizeImageCount(config.n),
+      n: is4kImageConfig(config) ? 1 : normalizeImageCount(config.n),
     };
 
     if (sourceImages.length > 0) {
@@ -1548,7 +1563,7 @@ async function generateImages(payload) {
   };
 
   const splitMultiImageRequest = model === "gpt-image-1.5" || model === "codex-image-2";
-  const requestedCount = splitMultiImageRequest ? normalizeImageCount(config.n) : 1;
+  const requestedCount = splitMultiImageRequest && !is4kImageConfig(config) ? normalizeImageCount(config.n) : 1;
   const requestBodies = splitMultiImageRequest
     ? Array.from({ length: requestedCount }, () => (model === "codex-image-2" ? { ...body, n: 1 } : { ...body }))
     : [body];
@@ -1963,7 +1978,6 @@ async function runJob(jobId) {
   job.error = "";
   await saveJob(job);
 
-  const startedAt = now();
   let lastError = null;
   const retryAttempts = Number.isFinite(MAX_AUTO_RETRY_ATTEMPTS) ? Math.floor(MAX_AUTO_RETRY_ATTEMPTS) : 1;
   const retryDelayMs = Number.isFinite(AUTO_RETRY_DELAY_MS) ? Math.floor(AUTO_RETRY_DELAY_MS) : 1200;
@@ -1990,7 +2004,7 @@ async function runJob(jobId) {
         job.progressPercent = 100;
         job.resultImages = resultImages;
         job.error = "";
-        job.generationTime = now() - startedAt;
+        job.generationTime = Math.max(0, now() - job.createdAt);
         job.autoRetryCount = Math.max(0, attempt - 1);
         delete job.lastTransientError;
         return;
@@ -2017,7 +2031,7 @@ async function runJob(jobId) {
     job.progress = "";
     job.progressPercent = 100;
     job.error = getErrorMessage(lastError) || "生成失败";
-    job.generationTime = now() - startedAt;
+    job.generationTime = Math.max(0, now() - job.createdAt);
   } finally {
     runtimePayloads.delete(jobId);
     await saveJob(job);

@@ -1,3 +1,4 @@
+import { is4kImageConfig } from "@/data/image-models";
 import {
   getFirstLastFrameSources,
   getResolvedVideoModelId,
@@ -1299,7 +1300,7 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
       enable_base64_output: false,
     };
   } else if (model === "codex-image-2") {
-    const count = normalizeImageCount(config.n);
+    const count = is4kImageConfig(config) ? 1 : normalizeImageCount(config.n);
     body = {
       model: "gpt-image-2",
       prompt,
@@ -1490,7 +1491,7 @@ export async function generateImageDirect(args: GenerateImageArgs): Promise<Gene
   };
 
   const splitMultiImageRequest = model === "gpt-image-1.5" || model === "codex-image-2";
-  const requestedCount = splitMultiImageRequest ? normalizeImageCount(config.n) : 1;
+  const requestedCount = splitMultiImageRequest && !is4kImageConfig(config) ? normalizeImageCount(config.n) : 1;
   const requestBodies = splitMultiImageRequest
     ? Array.from({ length: requestedCount }, () => (model === "codex-image-2" ? { ...body, n: 1 } : { ...body }))
     : [body];
@@ -1609,9 +1610,14 @@ export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): Image
   const sameClientRequest =
     !fallback?.clientRequestId || !job.clientRequestId || fallback.clientRequestId === job.clientRequestId;
   const stableTaskId = job.clientRequestId || fallback?.clientRequestId || fallback?.id || job.id;
+  const taskCreatedAt = sameClientRequest ? fallback?.createdAt || job.createdAt : job.createdAt;
+  const wallClockGenerationTime = Math.max(0, Number(job.updatedAt || Date.now()) - Number(taskCreatedAt));
+  const generationTime = pending
+    ? Math.max(Number(job.generationTime) || 0, Date.now() - Number(taskCreatedAt))
+    : Math.max(Number(job.generationTime) || 0, wallClockGenerationTime);
   return {
     id: sameClientRequest ? stableTaskId : job.clientRequestId || job.id,
-    createdAt: sameClientRequest ? fallback?.createdAt || job.createdAt : job.createdAt,
+    createdAt: taskCreatedAt,
     updatedAt: job.updatedAt,
     status: job.status === "succeeded" ? "success" : job.status === "failed" ? "failed" : "generating",
     serverJobId: job.id,
@@ -1627,9 +1633,7 @@ export function imageJobToTask(job: ImageJobStatus, fallback?: ImageTask): Image
     model: fallback?.model || job.model,
     modelConfig: fallback?.modelConfig || job.modelConfig,
     resultImages: pending ? fallback?.resultImages || [] : job.resultImages,
-    generationTime:
-      job.generationTime ||
-      (pending ? Date.now() - (sameClientRequest ? fallback?.createdAt || job.createdAt : job.createdAt) : 0),
+    generationTime,
     error: job.error || fallback?.error,
   };
 }

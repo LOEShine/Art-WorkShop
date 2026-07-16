@@ -40,6 +40,7 @@ import WanIcon from "@/components/icons/WanIcon.vue";
 import {
   createDefaultImageConfigs,
   DEFAULT_IMAGE_MODEL_ID,
+  getImageFieldOptions,
   IMAGE_MODELS,
   IMAGE_UPLOAD_LIMITS,
 } from "@/data/image-models";
@@ -743,7 +744,9 @@ function setImageModel(value: string) {
 }
 
 function setImageConfig(field: ImageModelField, rawValue: string) {
-  const option = field.options.find((item) => String(item.value) === rawValue);
+  const option = getImageFieldOptions(field, activeImageConfig.value).find(
+    (item) => String(item.value) === rawValue,
+  );
   store.setImageModelConfig(
     activeImageModelId.value,
     field.key,
@@ -763,7 +766,9 @@ function toggleDropdown(key: string) {
 
 function optionLabel(field: ImageModelField) {
   const value = String(activeImageConfig.value[field.key] ?? field.default);
-  return field.options.find((option) => String(option.value) === value)?.label ?? value;
+  return getImageFieldOptions(field, activeImageConfig.value).find(
+    (option) => String(option.value) === value,
+  )?.label ?? value;
 }
 
 function getNode(nodeId: string) {
@@ -1890,7 +1895,7 @@ watch(viewport, scheduleSave, { deep: true });
           @pointerdown.stop
         >
           <button
-            v-for="option in field.options"
+            v-for="option in getImageFieldOptions(field, activeImageConfig)"
             :key="String(option.value)"
             type="button"
             class="canvas-dropdown-option"

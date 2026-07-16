@@ -1,6 +1,10 @@
 import { defineStore } from "pinia";
 
-import { createDefaultImageConfigs, DEFAULT_IMAGE_MODEL_ID } from "@/data/image-models";
+import {
+  createDefaultImageConfigs,
+  DEFAULT_IMAGE_MODEL_ID,
+  is4kImageConfig,
+} from "@/data/image-models";
 import {
   createDefaultVideoConfigs,
   normalizeVideoConfig,
@@ -134,6 +138,11 @@ function readPersistedState(): PersistedState {
       };
     }
     delete (imageModelConfigs as Record<string, ImageConfigRecord>)[LEGACY_SEEDREAM_MODEL_ID];
+    Object.values(imageModelConfigs).forEach((config) => {
+      if ("n" in config && is4kImageConfig(config)) {
+        config.n = 1;
+      }
+    });
 
     const videoConfigs = {
       ...defaults.videoConfigs,
@@ -290,10 +299,14 @@ export const useAppStore = defineStore("artWorkshop", {
       this.persist();
     },
     setImageModelConfig(model: ImageModelId, key: string, value: ImageConfigValue) {
-      this.imageModelConfigs[model] = {
+      const nextConfig = {
         ...this.imageModelConfigs[model],
         [key]: value,
       };
+      if ("n" in nextConfig && is4kImageConfig(nextConfig)) {
+        nextConfig.n = 1;
+      }
+      this.imageModelConfigs[model] = nextConfig;
       this.persist();
     },
     setPrompt(prompt: string) {
